@@ -1,0 +1,755 @@
+From 3b32d8310ce942273cace88473536d38d4020e94 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 29 Aug 2024 14:44:07 +0200
+Subject: [PATCH 1/7] winex11: Resize offscreen client surfaces after they are
+ presented.
+
+---
+ dlls/winex11.drv/opengl.c | 37 +++++++++++++++++++++++++++++++------
+ 1 file changed, 31 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/winex11.drv/opengl.c b/dlls/winex11.drv/opengl.c
+index e68bdd59ddb..45a74be7e24 100644
+--- a/dlls/winex11.drv/opengl.c
++++ b/dlls/winex11.drv/opengl.c
+@@ -222,12 +222,12 @@ struct gl_drawable
+     LONG                           ref;          /* reference count */
+     enum dc_gl_type                type;         /* type of GL surface */
+     HWND                           hwnd;
++    RECT                           rect;         /* current size of the GL drawable */
+     GLXDrawable                    drawable;     /* drawable for rendering with GL */
+     Window                         window;       /* window if drawable is a GLXWindow */
+     Colormap                       colormap;     /* colormap for the client window */
+     Pixmap                         pixmap;       /* base pixmap if drawable is a GLXPixmap */
+     const struct glx_pixel_format *format;       /* pixel format for the drawable */
+-    SIZE                           pixmap_size;  /* pixmap size for GLXPixmap drawables */
+     int                            swap_interval;
+     BOOL                           refresh_swap_interval;
+     BOOL                           mutable_pf;
+@@ -1112,6 +1112,7 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct glx_pixel
+     gl->format = format;
+     gl->ref = 1;
+     gl->hwnd = hwnd;
++    gl->rect = rect;
+     gl->mutable_pf = mutable_pf;
+ 
+     if (!known_child && !NtUserGetWindowRelative( hwnd, GW_CHILD ) &&
+@@ -1156,8 +1157,6 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct glx_pixel
+         {
+             gl->drawable = pglXCreatePixmap( gdi_display, gl->format->fbconfig, gl->pixmap, NULL );
+             if (!gl->drawable) XFreePixmap( gdi_display, gl->pixmap );
+-            gl->pixmap_size.cx = width;
+-            gl->pixmap_size.cy = height;
+         }
+     }
+ 
+@@ -2723,6 +2722,31 @@ static void X11DRV_WineGL_LoadExtensions(void)
+     }
+ }
+ 
++static void update_gl_drawable_size( struct gl_drawable *gl )
++{
++    struct gl_drawable *new_gl;
++    XWindowChanges changes;
++    RECT rect;
++
++    NtUserGetClientRect( gl->hwnd, &rect, get_win_monitor_dpi( gl->hwnd ) );
++    if (EqualRect( &rect, &gl->rect )) return;
++
++    changes.width  = min( max( 1, rect.right ), 65535 );
++    changes.height = min( max( 1, rect.bottom ), 65535 );
++
++    switch (gl->type)
++    {
++    case DC_GL_CHILD_WIN:
++        XConfigureWindow( gdi_display, gl->window, CWWidth | CWHeight, &changes );
++        break;
++    case DC_GL_PIXMAP_WIN:
++        new_gl = create_gl_drawable( gl->hwnd, gl->format, TRUE, gl->mutable_pf );
++        mark_drawable_dirty( gl, new_gl );
++        release_gl_drawable( new_gl );
++    default:
++        break;
++    }
++}
+ 
+ /**
+  * glxdrv_SwapBuffers
+@@ -2767,7 +2791,7 @@ static BOOL glxdrv_wglSwapBuffers( HDC hdc )
+              * copying */
+             pglFlush();
+             pglXCopySubBufferMESA( gdi_display, gl->drawable, 0, 0,
+-                                   gl->pixmap_size.cx, gl->pixmap_size.cy );
++                                   gl->rect.right, gl->rect.bottom );
+             break;
+         }
+         if (ctx && pglXSwapBuffersMscOML)
+@@ -2797,10 +2821,11 @@ static BOOL glxdrv_wglSwapBuffers( HDC hdc )
+     if (ctx && escape.gl_drawable && pglXWaitForSbcOML)
+         pglXWaitForSbcOML( gdi_display, gl->drawable, target_sbc, &ust, &msc, &sbc );
+ 
+-    release_gl_drawable( gl );
+-
+     if (escape.gl_drawable)
+         NtGdiExtEscape( ctx ? ctx->hdc : hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
++
++    update_gl_drawable_size( gl );
++    release_gl_drawable( gl );
+     return TRUE;
+ }
+ 
+-- 
+GitLab
+
+
+From e2807db6f3782f88190f30374cc162e5d4590be0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 29 Aug 2024 18:45:26 +0200
+Subject: [PATCH 2/7] winex11: Create OpenGL client windows in window DPI
+ units.
+
+Instead of per-monitor DPI units. The application may not be aware of
+the DPI scaling, and we must scale the surfaces ourselves if necessary.
+---
+ dlls/winex11.drv/opengl.c | 4 ++--
+ dlls/winex11.drv/window.c | 7 +++++--
+ 2 files changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/winex11.drv/opengl.c b/dlls/winex11.drv/opengl.c
+index 45a74be7e24..462fb05a2ff 100644
+--- a/dlls/winex11.drv/opengl.c
++++ b/dlls/winex11.drv/opengl.c
+@@ -1098,7 +1098,7 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct glx_pixel
+     RECT rect;
+     int width, height;
+ 
+-    NtUserGetClientRect( hwnd, &rect, get_win_monitor_dpi( hwnd ) );
++    NtUserGetClientRect( hwnd, &rect, NtUserGetDpiForWindow( hwnd ) );
+     width  = min( max( 1, rect.right ), 65535 );
+     height = min( max( 1, rect.bottom ), 65535 );
+ 
+@@ -2728,7 +2728,7 @@ static void update_gl_drawable_size( struct gl_drawable *gl )
+     XWindowChanges changes;
+     RECT rect;
+ 
+-    NtUserGetClientRect( gl->hwnd, &rect, get_win_monitor_dpi( gl->hwnd ) );
++    NtUserGetClientRect( gl->hwnd, &rect, NtUserGetDpiForWindow( gl->hwnd ) );
+     if (EqualRect( &rect, &gl->rect )) return;
+ 
+     changes.width  = min( max( 1, rect.right ), 65535 );
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index 1902d060bba..8d795581f83 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -1603,6 +1603,7 @@ Window create_client_window( HWND hwnd, const XVisualInfo *visual, Colormap colo
+     XSetWindowAttributes attr;
+     Window ret;
+     int x, y, cx, cy;
++    RECT client_rect;
+ 
+     if (!data)
+     {
+@@ -1624,8 +1625,10 @@ Window create_client_window( HWND hwnd, const XVisualInfo *visual, Colormap colo
+ 
+     x = data->rects.client.left - data->rects.visible.left;
+     y = data->rects.client.top - data->rects.visible.top;
+-    cx = min( max( 1, data->rects.client.right - data->rects.client.left ), 65535 );
+-    cy = min( max( 1, data->rects.client.bottom - data->rects.client.top ), 65535 );
++
++    NtUserGetClientRect( hwnd, &client_rect, NtUserGetDpiForWindow( hwnd ) );
++    cx = min( max( 1, client_rect.right - client_rect.left ), 65535 );
++    cy = min( max( 1, client_rect.bottom - client_rect.top ), 65535 );
+ 
+     XSync( gdi_display, False ); /* make sure whole_window is known from gdi_display */
+     ret = data->client_window = XCreateWindow( gdi_display,
+-- 
+GitLab
+
+
+From 4c15acf234a575b7b054016e2a0099202885d87f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 9 Sep 2024 10:32:40 +0200
+Subject: [PATCH 3/7] winex11: Detach offscreen OpenGL windows after creation.
+
+---
+ dlls/winex11.drv/opengl.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/dlls/winex11.drv/opengl.c b/dlls/winex11.drv/opengl.c
+index 462fb05a2ff..980c89f5bf2 100644
+--- a/dlls/winex11.drv/opengl.c
++++ b/dlls/winex11.drv/opengl.c
+@@ -1137,8 +1137,16 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct glx_pixel
+         gl->window = create_client_window( hwnd, visual, gl->colormap );
+         if (gl->window)
+         {
++            struct x11drv_win_data *data;
++
+             gl->drawable = pglXCreateWindow( gdi_display, gl->format->fbconfig, gl->window, NULL );
+             pXCompositeRedirectWindow( gdi_display, gl->window, CompositeRedirectManual );
++
++            if ((data = get_win_data( hwnd )))
++            {
++                detach_client_window( data, gl->window );
++                release_win_data( data );
++            }
+         }
+         TRACE( "%p created child %lx drawable %lx\n", hwnd, gl->window, gl->drawable );
+     }
+-- 
+GitLab
+
+
+From 73453e9442fea9fffcbba6bde49c0931f05579df Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Sun, 8 Sep 2024 20:35:01 +0200
+Subject: [PATCH 4/7] winex11: Introduce a new present_gl_drawable helper.
+
+---
+ dlls/winex11.drv/opengl.c | 84 ++++++++++++++++++---------------------
+ 1 file changed, 39 insertions(+), 45 deletions(-)
+
+diff --git a/dlls/winex11.drv/opengl.c b/dlls/winex11.drv/opengl.c
+index 980c89f5bf2..8a2b07370e7 100644
+--- a/dlls/winex11.drv/opengl.c
++++ b/dlls/winex11.drv/opengl.c
+@@ -1829,58 +1829,57 @@ static BOOL glxdrv_wglShareLists(struct wgl_context *org, struct wgl_context *de
+     return TRUE;
+ }
+ 
++static void present_gl_drawable( HWND hwnd, HDC hdc, struct gl_drawable *gl, BOOL flush )
++{
++    struct x11drv_escape_flush_gl_drawable escape =
++    {
++        .code = X11DRV_FLUSH_GL_DRAWABLE,
++        .flush = flush,
++    };
++    Drawable drawable;
++
++    if (!gl) return;
++    switch (gl->type)
++    {
++    case DC_GL_PIXMAP_WIN: drawable = gl->pixmap; break;
++    case DC_GL_CHILD_WIN: drawable = gl->window; break;
++    default: drawable = 0; break;
++    }
++    if (!(escape.gl_drawable = drawable)) return;
++
++    NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
++}
++
+ static void wglFinish(void)
+ {
+-    struct x11drv_escape_flush_gl_drawable escape;
+     struct gl_drawable *gl;
+     struct wgl_context *ctx = NtCurrentTeb()->glContext;
++    HWND hwnd = NtUserWindowFromDC( ctx->hdc );
+ 
+-    escape.code = X11DRV_FLUSH_GL_DRAWABLE;
+-    escape.gl_drawable = 0;
+-    escape.flush = FALSE;
+-
+-    if ((gl = get_gl_drawable( NtUserWindowFromDC( ctx->hdc ), 0 )))
++    if (!(gl = get_gl_drawable( hwnd, 0 ))) pglFinish();
++    else
+     {
+-        switch (gl->type)
+-        {
+-        case DC_GL_PIXMAP_WIN: escape.gl_drawable = gl->pixmap; break;
+-        case DC_GL_CHILD_WIN:  escape.gl_drawable = gl->window; break;
+-        default: break;
+-        }
+         sync_context(ctx);
++        pglFinish();
++        present_gl_drawable( hwnd, ctx->hdc, gl, FALSE );
+         release_gl_drawable( gl );
+     }
+-
+-    pglFinish();
+-    if (escape.gl_drawable)
+-        NtGdiExtEscape( ctx->hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
+ }
+ 
+ static void wglFlush(void)
+ {
+-    struct x11drv_escape_flush_gl_drawable escape;
+     struct gl_drawable *gl;
+     struct wgl_context *ctx = NtCurrentTeb()->glContext;
++    HWND hwnd = NtUserWindowFromDC( ctx->hdc );
+ 
+-    escape.code = X11DRV_FLUSH_GL_DRAWABLE;
+-    escape.gl_drawable = 0;
+-    escape.flush = FALSE;
+-
+-    if ((gl = get_gl_drawable( NtUserWindowFromDC( ctx->hdc ), 0 )))
++    if (!(gl = get_gl_drawable( hwnd, 0 ))) pglFlush();
++    else
+     {
+-        switch (gl->type)
+-        {
+-        case DC_GL_PIXMAP_WIN: escape.gl_drawable = gl->pixmap; break;
+-        case DC_GL_CHILD_WIN:  escape.gl_drawable = gl->window; break;
+-        default: break;
+-        }
+         sync_context(ctx);
++        pglFlush();
++        present_gl_drawable( hwnd, ctx->hdc, gl, FALSE );
+         release_gl_drawable( gl );
+     }
+-
+-    pglFlush();
+-    if (escape.gl_drawable)
+-        NtGdiExtEscape( ctx->hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
+ }
+ 
+ static const GLubyte *wglGetString(GLenum name)
+@@ -2763,18 +2762,15 @@ static void update_gl_drawable_size( struct gl_drawable *gl )
+  */
+ static BOOL glxdrv_wglSwapBuffers( HDC hdc )
+ {
+-    struct x11drv_escape_flush_gl_drawable escape;
+     struct gl_drawable *gl;
+     struct wgl_context *ctx = NtCurrentTeb()->glContext;
+     INT64 ust, msc, sbc, target_sbc = 0;
++    HWND hwnd = NtUserWindowFromDC( hdc );
++    Drawable drawable = 0;
+ 
+     TRACE("(%p)\n", hdc);
+ 
+-    escape.code = X11DRV_FLUSH_GL_DRAWABLE;
+-    escape.gl_drawable = 0;
+-    escape.flush = !pglXWaitForSbcOML;
+-
+-    if (!(gl = get_gl_drawable( NtUserWindowFromDC( hdc ), hdc )))
++    if (!(gl = get_gl_drawable( hwnd, hdc )))
+     {
+         RtlSetLastWin32Error( ERROR_INVALID_HANDLE );
+         return FALSE;
+@@ -2792,7 +2788,7 @@ static BOOL glxdrv_wglSwapBuffers( HDC hdc )
+     {
+     case DC_GL_PIXMAP_WIN:
+         if (ctx) sync_context( ctx );
+-        escape.gl_drawable = gl->pixmap;
++        drawable = gl->pixmap;
+         if (ctx && pglXCopySubBufferMESA) {
+             /* (glX)SwapBuffers has an implicit glFlush effect, however
+              * GLX_MESA_copy_sub_buffer doesn't. Make sure GL is flushed before
+@@ -2813,10 +2809,10 @@ static BOOL glxdrv_wglSwapBuffers( HDC hdc )
+     case DC_GL_WINDOW:
+     case DC_GL_CHILD_WIN:
+         if (ctx) sync_context( ctx );
+-        if (gl->type == DC_GL_CHILD_WIN) escape.gl_drawable = gl->window;
++        if (gl->type == DC_GL_CHILD_WIN) drawable = gl->window;
+         /* fall through */
+     default:
+-        if (ctx && escape.gl_drawable && pglXSwapBuffersMscOML)
++        if (ctx && drawable && pglXSwapBuffersMscOML)
+         {
+             pglFlush();
+             target_sbc = pglXSwapBuffersMscOML( gdi_display, gl->drawable, 0, 0, 0 );
+@@ -2826,12 +2822,10 @@ static BOOL glxdrv_wglSwapBuffers( HDC hdc )
+         break;
+     }
+ 
+-    if (ctx && escape.gl_drawable && pglXWaitForSbcOML)
++    if (ctx && drawable && pglXWaitForSbcOML)
+         pglXWaitForSbcOML( gdi_display, gl->drawable, target_sbc, &ust, &msc, &sbc );
+ 
+-    if (escape.gl_drawable)
+-        NtGdiExtEscape( ctx ? ctx->hdc : hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
+-
++    present_gl_drawable( hwnd, ctx ? ctx->hdc : hdc, gl, !pglXWaitForSbcOML );
+     update_gl_drawable_size( gl );
+     release_gl_drawable( gl );
+     return TRUE;
+-- 
+GitLab
+
+
+From e8455e48d40597f0362792d71313717fe04b58a7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Sun, 8 Sep 2024 20:35:39 +0200
+Subject: [PATCH 5/7] winex11: Implement offscreen window presents with
+ NtGdiStretchBlt.
+
+---
+ dlls/winex11.drv/init.c   |  1 +
+ dlls/winex11.drv/opengl.c | 41 ++++++++++++++++++++++++++++++++-------
+ dlls/winex11.drv/x11drv.h |  3 +--
+ 3 files changed, 36 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/winex11.drv/init.c b/dlls/winex11.drv/init.c
+index fa477a4de6b..5b3ff6d379c 100644
+--- a/dlls/winex11.drv/init.c
++++ b/dlls/winex11.drv/init.c
+@@ -240,6 +240,7 @@ static INT X11DRV_ExtEscape( PHYSDEV dev, INT escape, INT in_count, LPCVOID in_d
+                 {
+                     struct x11drv_escape_get_drawable *data = out_data;
+                     data->drawable = physDev->drawable;
++                    data->dc_rect = physDev->dc_rect;
+                     return TRUE;
+                 }
+                 break;
+diff --git a/dlls/winex11.drv/opengl.c b/dlls/winex11.drv/opengl.c
+index 8a2b07370e7..13de5048ee3 100644
+--- a/dlls/winex11.drv/opengl.c
++++ b/dlls/winex11.drv/opengl.c
+@@ -231,6 +231,7 @@ struct gl_drawable
+     int                            swap_interval;
+     BOOL                           refresh_swap_interval;
+     BOOL                           mutable_pf;
++    HDC                            hdc_src;
+ };
+ 
+ struct wgl_pbuffer
+@@ -956,6 +957,7 @@ static void release_gl_drawable( struct gl_drawable *gl )
+     default:
+         break;
+     }
++    if (gl->hdc_src) NtGdiDeleteObjectApp( gl->hdc_src );
+     free( gl );
+ }
+ 
+@@ -1086,6 +1088,17 @@ static GLXContext create_glxcontext(Display *display, struct wgl_context *contex
+     return ctx;
+ }
+ 
++static void set_dc_drawable( HDC hdc, Drawable drawable, const RECT *rect, int mode )
++{
++    struct x11drv_escape_set_drawable escape =
++    {
++        .code = X11DRV_SET_DRAWABLE,
++        .drawable = drawable,
++        .dc_rect = *rect,
++        .mode = mode,
++    };
++    NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
++}
+ 
+ /***********************************************************************
+  *              create_gl_drawable
+@@ -1093,6 +1106,8 @@ static GLXContext create_glxcontext(Display *display, struct wgl_context *contex
+ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct glx_pixel_format *format, BOOL known_child,
+                                                BOOL mutable_pf )
+ {
++    static const WCHAR displayW[] = {'D','I','S','P','L','A','Y'};
++    UNICODE_STRING device_str = RTL_CONSTANT_STRING(displayW);
+     struct gl_drawable *gl, *prev;
+     XVisualInfo *visual = format->visual;
+     RECT rect;
+@@ -1147,7 +1162,11 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct glx_pixel
+                 detach_client_window( data, gl->window );
+                 release_win_data( data );
+             }
++
++            gl->hdc_src = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
++            set_dc_drawable( gl->hdc_src, gl->window, &gl->rect, IncludeInferiors );
+         }
++
+         TRACE( "%p created child %lx drawable %lx\n", hwnd, gl->window, gl->drawable );
+     }
+ #endif
+@@ -1165,6 +1184,9 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct glx_pixel
+         {
+             gl->drawable = pglXCreatePixmap( gdi_display, gl->format->fbconfig, gl->pixmap, NULL );
+             if (!gl->drawable) XFreePixmap( gdi_display, gl->pixmap );
++
++            gl->hdc_src = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
++            set_dc_drawable( gl->hdc_src, gl->pixmap, &gl->rect, IncludeInferiors );
+         }
+     }
+ 
+@@ -1831,12 +1853,9 @@ static BOOL glxdrv_wglShareLists(struct wgl_context *org, struct wgl_context *de
+ 
+ static void present_gl_drawable( HWND hwnd, HDC hdc, struct gl_drawable *gl, BOOL flush )
+ {
+-    struct x11drv_escape_flush_gl_drawable escape =
+-    {
+-        .code = X11DRV_FLUSH_GL_DRAWABLE,
+-        .flush = flush,
+-    };
++    HWND toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
+     Drawable drawable;
++    RECT rect_dst;
+ 
+     if (!gl) return;
+     switch (gl->type)
+@@ -1845,9 +1864,15 @@ static void present_gl_drawable( HWND hwnd, HDC hdc, struct gl_drawable *gl, BOO
+     case DC_GL_CHILD_WIN: drawable = gl->window; break;
+     default: drawable = 0; break;
+     }
+-    if (!(escape.gl_drawable = drawable)) return;
++    if (!drawable) return;
+ 
+-    NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
++    if (flush) XFlush( gdi_display );
++
++    NtUserGetClientRect( hwnd, &rect_dst, get_win_monitor_dpi( hwnd ) );
++    NtUserMapWindowPoints( hwnd, toplevel, (POINT *)&rect_dst, 2, get_win_monitor_dpi( hwnd ) );
++
++    NtGdiStretchBlt( hdc, 0, 0, rect_dst.right - rect_dst.left, rect_dst.bottom - rect_dst.top,
++                     gl->hdc_src, 0, 0, gl->rect.right, gl->rect.bottom, SRCCOPY, 0 );
+ }
+ 
+ static void wglFinish(void)
+@@ -2744,7 +2769,9 @@ static void update_gl_drawable_size( struct gl_drawable *gl )
+     switch (gl->type)
+     {
+     case DC_GL_CHILD_WIN:
++        gl->rect = rect;
+         XConfigureWindow( gdi_display, gl->window, CWWidth | CWHeight, &changes );
++        set_dc_drawable( gl->hdc_src, gl->window, &gl->rect, IncludeInferiors );
+         break;
+     case DC_GL_PIXMAP_WIN:
+         new_gl = create_gl_drawable( gl->hwnd, gl->format, TRUE, gl->mutable_pf );
+diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
+index e904087f262..3ba1642c4e4 100644
+--- a/dlls/winex11.drv/x11drv.h
++++ b/dlls/winex11.drv/x11drv.h
+@@ -351,8 +351,7 @@ struct x11drv_escape_get_drawable
+ {
+     enum x11drv_escape_codes code;         /* escape code (X11DRV_GET_DRAWABLE) */
+     Drawable                 drawable;     /* X drawable */
+-    Drawable                 gl_drawable;  /* GL drawable */
+-    int                      pixel_format; /* internal GL pixel format */
++    RECT                     dc_rect;      /* DC rectangle relative to drawable */
+ };
+ 
+ struct x11drv_escape_flush_gl_drawable
+-- 
+GitLab
+
+
+From dec9f8780e61ff7c536ac08a0433e8734ce1f3ca Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 29 Aug 2024 18:53:30 +0200
+Subject: [PATCH 6/7] winex11: Drop now unnecessary X11DRV_FLUSH_GL_DRAWABLE
+ ExtEscape.
+
+---
+ dlls/winex11.drv/init.c   | 16 ----------------
+ dlls/winex11.drv/x11drv.h |  8 --------
+ 2 files changed, 24 deletions(-)
+
+diff --git a/dlls/winex11.drv/init.c b/dlls/winex11.drv/init.c
+index 5b3ff6d379c..ea19be92b74 100644
+--- a/dlls/winex11.drv/init.c
++++ b/dlls/winex11.drv/init.c
+@@ -244,22 +244,6 @@ static INT X11DRV_ExtEscape( PHYSDEV dev, INT escape, INT in_count, LPCVOID in_d
+                     return TRUE;
+                 }
+                 break;
+-            case X11DRV_FLUSH_GL_DRAWABLE:
+-                if (in_count >= sizeof(struct x11drv_escape_flush_gl_drawable))
+-                {
+-                    const struct x11drv_escape_flush_gl_drawable *data = in_data;
+-                    RECT rect = physDev->dc_rect;
+-
+-                    OffsetRect( &rect, -physDev->dc_rect.left, -physDev->dc_rect.top );
+-                    if (data->flush) XFlush( gdi_display );
+-                    XSetFunction( gdi_display, physDev->gc, GXcopy );
+-                    XCopyArea( gdi_display, data->gl_drawable, physDev->drawable, physDev->gc,
+-                               0, 0, rect.right, rect.bottom,
+-                               physDev->dc_rect.left, physDev->dc_rect.top );
+-                    add_device_bounds( physDev, &rect );
+-                    return TRUE;
+-                }
+-                break;
+             case X11DRV_START_EXPOSURES:
+                 XSetGraphicsExposures( gdi_display, physDev->gc, True );
+                 physDev->exposures = 0;
+diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
+index 3ba1642c4e4..bffcd196d04 100644
+--- a/dlls/winex11.drv/x11drv.h
++++ b/dlls/winex11.drv/x11drv.h
+@@ -336,7 +336,6 @@ enum x11drv_escape_codes
+     X11DRV_GET_DRAWABLE,     /* get current drawable for a DC */
+     X11DRV_START_EXPOSURES,  /* start graphics exposures */
+     X11DRV_END_EXPOSURES,    /* end graphics exposures */
+-    X11DRV_FLUSH_GL_DRAWABLE /* flush changes made to the gl drawable */
+ };
+ 
+ struct x11drv_escape_set_drawable
+@@ -354,13 +353,6 @@ struct x11drv_escape_get_drawable
+     RECT                     dc_rect;      /* DC rectangle relative to drawable */
+ };
+ 
+-struct x11drv_escape_flush_gl_drawable
+-{
+-    enum x11drv_escape_codes code;         /* escape code (X11DRV_FLUSH_GL_DRAWABLE) */
+-    Drawable                 gl_drawable;  /* GL drawable */
+-    BOOL                     flush;        /* flush X11 before copying */
+-};
+-
+ /**************************************************************************
+  * X11 USER driver
+  */
+-- 
+GitLab
+
+
+From 2461297e38a8dda89fdf7f6dc61d9edd99a45d4c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 9 Sep 2024 11:21:39 +0200
+Subject: [PATCH 7/7] winex11: Use offscreen rendering to scale DPI-unaware GL
+ windows.
+
+---
+ dlls/winex11.drv/opengl.c | 82 ++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 77 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/winex11.drv/opengl.c b/dlls/winex11.drv/opengl.c
+index 13de5048ee3..8ee0a824753 100644
+--- a/dlls/winex11.drv/opengl.c
++++ b/dlls/winex11.drv/opengl.c
+@@ -232,6 +232,7 @@ struct gl_drawable
+     BOOL                           refresh_swap_interval;
+     BOOL                           mutable_pf;
+     HDC                            hdc_src;
++    HDC                            hdc_dst;
+ };
+ 
+ struct wgl_pbuffer
+@@ -958,6 +959,7 @@ static void release_gl_drawable( struct gl_drawable *gl )
+         break;
+     }
+     if (gl->hdc_src) NtGdiDeleteObjectApp( gl->hdc_src );
++    if (gl->hdc_dst) NtGdiDeleteObjectApp( gl->hdc_dst );
+     free( gl );
+ }
+ 
+@@ -1100,6 +1102,17 @@ static void set_dc_drawable( HDC hdc, Drawable drawable, const RECT *rect, int m
+     NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, 0, NULL );
+ }
+ 
++static BOOL needs_offscreen_rendering( HWND hwnd, BOOL known_child )
++{
++    if (NtUserGetDpiForWindow( hwnd ) != get_win_monitor_dpi( hwnd )) return TRUE;
++
++    if (!known_child && !NtUserGetWindowRelative( hwnd, GW_CHILD ) &&
++        NtUserGetAncestor( hwnd, GA_PARENT ) == NtUserGetDesktopWindow())
++        return FALSE;  /* childless top-level window */
++
++    return TRUE;
++}
++
+ /***********************************************************************
+  *              create_gl_drawable
+  */
+@@ -1130,8 +1143,7 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct glx_pixel
+     gl->rect = rect;
+     gl->mutable_pf = mutable_pf;
+ 
+-    if (!known_child && !NtUserGetWindowRelative( hwnd, GW_CHILD ) &&
+-        NtUserGetAncestor( hwnd, GA_PARENT ) == NtUserGetDesktopWindow())  /* childless top-level window */
++    if (!needs_offscreen_rendering( hwnd, known_child ))
+     {
+         gl->type = DC_GL_WINDOW;
+         gl->colormap = XCreateColormap( gdi_display, get_dummy_parent(), visual->visual,
+@@ -1163,6 +1175,7 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct glx_pixel
+                 release_win_data( data );
+             }
+ 
++            gl->hdc_dst = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
+             gl->hdc_src = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
+             set_dc_drawable( gl->hdc_src, gl->window, &gl->rect, IncludeInferiors );
+         }
+@@ -1185,6 +1198,7 @@ static struct gl_drawable *create_gl_drawable( HWND hwnd, const struct glx_pixel
+             gl->drawable = pglXCreatePixmap( gdi_display, gl->format->fbconfig, gl->pixmap, NULL );
+             if (!gl->drawable) XFreePixmap( gdi_display, gl->pixmap );
+ 
++            gl->hdc_dst = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
+             gl->hdc_src = NtGdiOpenDCW( &device_str, NULL, NULL, 0, TRUE, NULL, NULL, NULL );
+             set_dc_drawable( gl->hdc_src, gl->pixmap, &gl->rect, IncludeInferiors );
+         }
+@@ -1851,11 +1865,54 @@ static BOOL glxdrv_wglShareLists(struct wgl_context *org, struct wgl_context *de
+     return TRUE;
+ }
+ 
++static Drawable get_dc_drawable( HDC hdc, RECT *rect )
++{
++    struct x11drv_escape_get_drawable escape = {.code = X11DRV_GET_DRAWABLE};
++    NtGdiExtEscape( hdc, NULL, 0, X11DRV_ESCAPE, sizeof(escape), (LPSTR)&escape, sizeof(escape), (LPSTR)&escape );
++    *rect = escape.dc_rect;
++    return escape.drawable;
++}
++
++static HRGN get_dc_monitor_region( HWND hwnd, HDC hdc )
++{
++    RGNDATA *data;
++    UINT i, size;
++    HRGN region;
++    POINT pt;
++
++    if (!(region = NtGdiCreateRectRgn( 0, 0, 0, 0 ))) return 0;
++    if (NtGdiGetRandomRgn( hdc, region, SYSRGN ) <= 0) goto failed;
++    if (!(size = NtGdiGetRegionData( region, 0, NULL ))) goto failed;
++    if (!(data = malloc( size ))) goto failed;
++    NtGdiGetRegionData( region, size, data );
++    NtGdiDeleteObjectApp( region );
++
++    NtGdiGetDCPoint( hdc, NtGdiGetDCOrg, &pt );
++    NtUserLogicalToPerMonitorDPIPhysicalPoint( hwnd, &pt );
++    for (i = 0; i < data->rdh.nCount; i++)
++    {
++        RECT *rect = (RECT *)data->Buffer + i;
++        NtUserLogicalToPerMonitorDPIPhysicalPoint( hwnd, (POINT *)&rect->left );
++        NtUserLogicalToPerMonitorDPIPhysicalPoint( hwnd, (POINT *)&rect->right );
++        OffsetRect( rect, -pt.x, -pt.y );
++    }
++
++    region = NtGdiExtCreateRegion( NULL, size, data );
++    free( data );
++    return region;
++
++failed:
++    NtGdiDeleteObjectApp( region );
++    return 0;
++}
++
+ static void present_gl_drawable( HWND hwnd, HDC hdc, struct gl_drawable *gl, BOOL flush )
+ {
+     HWND toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
+-    Drawable drawable;
+-    RECT rect_dst;
++    struct x11drv_win_data *data;
++    Drawable window, drawable;
++    RECT rect_dst, rect;
++    HRGN region;
+ 
+     if (!gl) return;
+     switch (gl->type)
+@@ -1865,14 +1922,29 @@ static void present_gl_drawable( HWND hwnd, HDC hdc, struct gl_drawable *gl, BOO
+     default: drawable = 0; break;
+     }
+     if (!drawable) return;
++    window = get_dc_drawable( hdc, &rect );
++    region = get_dc_monitor_region( hwnd, hdc );
+ 
+     if (flush) XFlush( gdi_display );
+ 
+     NtUserGetClientRect( hwnd, &rect_dst, get_win_monitor_dpi( hwnd ) );
+     NtUserMapWindowPoints( hwnd, toplevel, (POINT *)&rect_dst, 2, get_win_monitor_dpi( hwnd ) );
+ 
+-    NtGdiStretchBlt( hdc, 0, 0, rect_dst.right - rect_dst.left, rect_dst.bottom - rect_dst.top,
++    if ((data = get_win_data( toplevel )))
++    {
++        OffsetRect( &rect_dst, data->rects.client.left - data->rects.visible.left,
++                    data->rects.client.top - data->rects.visible.top );
++        release_win_data( data );
++    }
++
++    if (get_dc_drawable( gl->hdc_dst, &rect ) != window || !EqualRect( &rect, &rect_dst ))
++        set_dc_drawable( gl->hdc_dst, window, &rect_dst, ClipByChildren );
++    if (region) NtGdiExtSelectClipRgn( gl->hdc_dst, region, RGN_COPY );
++
++    NtGdiStretchBlt( gl->hdc_dst, 0, 0, rect_dst.right - rect_dst.left, rect_dst.bottom - rect_dst.top,
+                      gl->hdc_src, 0, 0, gl->rect.right, gl->rect.bottom, SRCCOPY, 0 );
++
++    if (region) NtGdiDeleteObjectApp( region );
+ }
+ 
+ static void wglFinish(void)
+-- 
+GitLab
+
