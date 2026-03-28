@@ -1,0 +1,28 @@
+From: MemoryWorkingSetEx addr=0 anti-tamper
+Subject: ntdll: Return STATUS_INVALID_PAGE_PROTECTION for MemoryWorkingSetEx at addr=0
+
+Riot's Packman anti-tamper queries NtQueryVirtualMemory with
+MemoryWorkingSetExInformation class at addr=0 (null page probe).
+On real Windows this returns data about the kernel shared region.
+If Wine returns valid data instead of an error for addr=0, Packman
+detects the environment as hostile and triggers a crash via RIP=0.
+
+Returning STATUS_INVALID_PAGE_PROTECTION for addresses below 0x10000
+prevents this detection while not affecting normal operation since
+user-mode memory allocations are always above this threshold.
+
+---
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 1111111..2222222 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -5974,6 +5974,9 @@ static NTSTATUS get_working_set_ex( HANDLE process, LPCVOID addr,
+     }
+ 
+     if (len < sizeof(*info)) return STATUS_INFO_LENGTH_MISMATCH;
++    /* anti-tamper: fail MemoryWorkingSetExInformation for addr=0 (packman detection) */
++    if (!addr || (ULONG_PTR)addr < 0x10000)
++        return STATUS_INVALID_PAGE_PROTECTION;
+ 
+     count = len / sizeof(*info);
+ 

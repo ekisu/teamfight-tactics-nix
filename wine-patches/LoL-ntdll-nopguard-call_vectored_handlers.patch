@@ -2,7 +2,7 @@ diff --git a/dlls/ntdll/exception.c b/dlls/ntdll/exception.c
 index fc3e8982a98..a975e5c897a 100644
 --- a/dlls/ntdll/exception.c
 +++ b/dlls/ntdll/exception.c
-@@ -168,7 +168,9 @@ LONG call_vectored_handlers( EXCEPTION_RECORD *rec, CONTEXT *context )
+@@ -174,7 +174,9 @@ static LONG call_vectored_handlers( EXCEPTION_RECORD *rec, CONTEXT *context )
 
          TRACE( "calling handler at %p code=%lx flags=%lx\n",
                 func, rec->ExceptionCode, rec->ExceptionFlags );

@@ -1,1 +1,5 @@
 result
+build*
+Config
+Logs
+wine-versions

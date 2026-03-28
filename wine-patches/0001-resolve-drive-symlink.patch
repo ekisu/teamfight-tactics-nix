@@ -12,7 +12,7 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 index 706dbdc..02512ca 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -5428,30 +5428,98 @@ static NTSTATUS get_working_set_ex( HANDLE process, LPCVOID addr,
+@@ -6009,30 +6009,98 @@ static unsigned int get_working_set_ex( HANDLE process, LPCVOID addr,
      return STATUS_SUCCESS;
  }
  
@@ -158,4 +158,3 @@ index 9252944..8052702 100644
      SetLastError(0xdeadbeef);
 -- 
 2.49.0
-
