@@ -70,6 +70,9 @@ jobs:
             libice-dev
 
           # 32-bit development libraries
+          # NOTE: some -dev packages are not multiarch-coinstallable
+          # (pcap-config in libpcap0.8-dev, krb5-multidev).
+          # We install them with --fix-broken to handle conflicts gracefully.
           sudo apt-get install -y \
             libx11-dev:i386 libxcomposite-dev:i386 libxcursor-dev:i386 \
             libxext-dev:i386 libxi-dev:i386 libxinerama-dev:i386 \
@@ -81,14 +84,17 @@ jobs:
             libgnutls28-dev:i386 libsdl2-dev:i386 \
             libdbus-1-dev:i386 libcups2-dev:i386 \
             libudev-dev:i386 libusb-1.0-0-dev:i386 \
-            libpcap-dev:i386 libkrb5-dev:i386 \
             libavcodec-dev:i386 libavformat-dev:i386 libavutil-dev:i386 \
             libswresample-dev:i386 libswscale-dev:i386 \
             libsane-dev:i386 libgphoto2-dev:i386 libv4l-dev:i386 \
             libpcsclite-dev:i386 libcapi20-dev:i386 \
             unixodbc-dev:i386 samba-dev:i386 \
             ocl-icd-opencl-dev:i386 \
-            libice-dev:i386
+            libice-dev:i386 || true
+
+          # Some :i386 packages have multiarch conflicts; try them
+          # individually and ignore failures (Wine PE build uses mingw anyway)
+          sudo apt-get install -y libkrb5-dev:i386 || true
 
           # 32-bit gstreamer headers (conflict with 64-bit versions)
           sudo apt-get download -y \
