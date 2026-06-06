@@ -1,0 +1,167 @@
+name: Release Wine
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Wine version (e.g. 11.4)'
+        required: true
+        default: '11.4'
+  push:
+    tags:
+      - 'wine-*'
+
+env:
+  WINE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '11.4' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine Wine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${GITHUB_REF_NAME#wine-}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "wine_version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+
+          # Build tools
+          sudo apt-get install -y \
+            autoconf bison flex gcc g++ git perl python3 curl \
+            ccache gettext pkg-config make
+
+          # Cross-compilation for Windows PE binaries (wow64)
+          sudo apt-get install -y \
+            gcc-mingw-w64-i686 gcc-mingw-w64-x86-64 \
+            gcc-multilib g++-multilib
+
+          # 64-bit development libraries
+          sudo apt-get install -y \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
+            libxi-dev libxinerama-dev libxrandr-dev libxrender-dev \
+            libxxf86vm-dev x11proto-dev \
+            libvulkan-dev libgl1-mesa-dev libglu1-mesa-dev \
+            libfreetype-dev libfontconfig-dev \
+            libasound2-dev libpulse-dev \
+            libwayland-dev libxkbcommon-dev libxkbregistry-dev \
+            libgnutls28-dev libsdl2-dev \
+            libdbus-1-dev libcups2-dev \
+            libudev-dev libusb-1.0-0-dev \
+            libpcap-dev libkrb5-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libavcodec-dev libavformat-dev libavutil-dev \
+            libswresample-dev libswscale-dev \
+            libsane-dev libgphoto2-dev libv4l-dev \
+            libpcsclite-dev libcapi20-dev \
+            unixodbc-dev samba-dev \
+            ocl-icd-opencl-dev libunwind-dev \
+            libice-dev
+
+          # 32-bit development libraries
+          sudo apt-get install -y \
+            libx11-dev:i386 libxcomposite-dev:i386 libxcursor-dev:i386 \
+            libxext-dev:i386 libxi-dev:i386 libxinerama-dev:i386 \
+            libxrandr-dev:i386 libxrender-dev:i386 libxxf86vm-dev:i386 \
+            libvulkan-dev:i386 libgl1-mesa-dev:i386 libglu1-mesa-dev:i386 \
+            libfreetype-dev:i386 libfontconfig-dev:i386 \
+            libasound2-dev:i386 libpulse-dev:i386 \
+            libwayland-dev:i386 libxkbcommon-dev:i386 \
+            libgnutls28-dev:i386 libsdl2-dev:i386 \
+            libdbus-1-dev:i386 libcups2-dev:i386 \
+            libudev-dev:i386 libusb-1.0-0-dev:i386 \
+            libpcap-dev:i386 libkrb5-dev:i386 \
+            libavcodec-dev:i386 libavformat-dev:i386 libavutil-dev:i386 \
+            libswresample-dev:i386 libswscale-dev:i386 \
+            libsane-dev:i386 libgphoto2-dev:i386 libv4l-dev:i386 \
+            libpcsclite-dev:i386 libcapi20-dev:i386 \
+            unixodbc-dev:i386 samba-dev:i386 \
+            ocl-icd-opencl-dev:i386 \
+            libice-dev:i386
+
+          # 32-bit gstreamer headers (conflict with 64-bit versions)
+          sudo apt-get download -y \
+            libgstreamer-plugins-base1.0-dev:i386 \
+            libgstreamer1.0-dev:i386 2>/dev/null || true
+          for deb in *.deb; do
+            [ -f "$deb" ] && sudo dpkg-deb -x "$deb" /
+          done
+
+          # OSS soundcard header
+          sudo mkdir -p /usr/lib/oss/include/sys
+          sudo curl -sL -o /usr/lib/oss/include/sys/soundcard.h \
+            https://salsa.debian.org/debian/oss4/-/raw/debian/4.2-build2020-6/include/soundcard.h
+
+      - name: Set up ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-wine-${{ steps.version.outputs.wine_version }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-wine-${{ steps.version.outputs.wine_version }}-
+            ccache-wine-
+
+      - name: Build Wine
+        env:
+          WINE_VERSION: ${{ steps.version.outputs.wine_version }}
+        run: bash build-wine-ci.sh
+
+      - name: Package artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.wine_version }}"
+          TARBALL="wine-${VERSION}-x86_64-linux.tar.gz"
+          CHECKSUM="${TARBALL}.sha256"
+
+          cd /tmp/wine-build-ci/wine-install
+          tar czf "/tmp/wine-build-ci/${TARBALL}" .
+          cd /tmp/wine-build-ci
+          sha256sum "${TARBALL}" > "${CHECKSUM}"
+
+          echo "tarball=${TARBALL}" >> "$GITHUB_ENV"
+          echo "checksum=${CHECKSUM}" >> "$GITHUB_ENV"
+
+      - name: Upload artifacts (for workflow run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-${{ steps.version.outputs.wine_version }}-x86_64-linux
+          path: |
+            /tmp/wine-build-ci/wine-*.tar.gz
+            /tmp/wine-build-ci/wine-*.tar.gz.sha256
+          retention-days: 7
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/wine-')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Wine ${{ steps.version.outputs.wine_version }}
+          files: |
+            /tmp/wine-build-ci/wine-*.tar.gz
+            /tmp/wine-build-ci/wine-*.tar.gz.sha256
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: wine-${{ steps.version.outputs.wine_version }}
+          name: Wine ${{ steps.version.outputs.wine_version }}
+          files: |
+            /tmp/wine-build-ci/wine-*.tar.gz
+            /tmp/wine-build-ci/wine-*.tar.gz.sha256
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
