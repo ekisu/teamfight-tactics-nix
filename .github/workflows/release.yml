@@ -14,9 +14,6 @@ on:
 permissions:
   contents: write
 
-env:
-  WINE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '11.4' }}
-
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -126,15 +123,11 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.wine_version }}"
           TARBALL="wine-${VERSION}-x86_64-linux.tar.gz"
-          CHECKSUM="${TARBALL}.sha256"
 
-          cd /tmp/wine-build-ci/wine-install
+          cd /tmp/wine-build-ci/wine-install/opt/wine
           tar czf "/tmp/wine-build-ci/${TARBALL}" .
           cd /tmp/wine-build-ci
-          sha256sum "${TARBALL}" > "${CHECKSUM}"
-
-          echo "tarball=${TARBALL}" >> "$GITHUB_ENV"
-          echo "checksum=${CHECKSUM}" >> "$GITHUB_ENV"
+          sha256sum "${TARBALL}" > "${TARBALL}.sha256"
 
       - name: Upload artifacts (for workflow run)
         uses: actions/upload-artifact@v4
@@ -146,20 +139,6 @@ jobs:
           retention-days: 7
 
       - name: Create GitHub Release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/wine-')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: Wine ${{ steps.version.outputs.wine_version }}
-          files: |
-            /tmp/wine-build-ci/wine-*.tar.gz
-            /tmp/wine-build-ci/wine-*.tar.gz.sha256
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Release (manual dispatch)
-        if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: wine-${{ steps.version.outputs.wine_version }}
