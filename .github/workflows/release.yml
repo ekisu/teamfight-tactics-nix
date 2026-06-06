@@ -70,10 +70,10 @@ jobs:
             libice-dev
 
           # 32-bit development libraries
-          # NOTE: some -dev packages are not multiarch-coinstallable
-          # (pcap-config in libpcap0.8-dev, krb5-multidev).
-          # We install them with --fix-broken to handle conflicts gracefully.
-          sudo apt-get install -y \
+          # krb5-multidev and libpcap0.8-dev are not multiarch-coinstallable
+          # on Ubuntu 24.04 (they ship arch-specific files in /usr/bin).
+          # Work around by force-overwriting and excluding problematic packages.
+          sudo apt-get install -y -o Dpkg::Options::="--force-overwrite" \
             libx11-dev:i386 libxcomposite-dev:i386 libxcursor-dev:i386 \
             libxext-dev:i386 libxi-dev:i386 libxinerama-dev:i386 \
             libxrandr-dev:i386 libxrender-dev:i386 libxxf86vm-dev:i386 \
@@ -90,11 +90,7 @@ jobs:
             libpcsclite-dev:i386 libcapi20-dev:i386 \
             unixodbc-dev:i386 samba-dev:i386 \
             ocl-icd-opencl-dev:i386 \
-            libice-dev:i386 || true
-
-          # Some :i386 packages have multiarch conflicts; try them
-          # individually and ignore failures (Wine PE build uses mingw anyway)
-          sudo apt-get install -y libkrb5-dev:i386 || true
+            libice-dev:i386 libkrb5-dev:i386
 
           # 32-bit gstreamer headers (conflict with 64-bit versions)
           sudo apt-get download -y \
