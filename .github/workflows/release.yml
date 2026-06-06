@@ -11,6 +11,9 @@ on:
     tags:
       - 'wine-*'
 
+permissions:
+  contents: write
+
 env:
   WINE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '11.4' }}
 
