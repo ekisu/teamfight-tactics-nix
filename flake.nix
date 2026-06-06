@@ -3,11 +3,7 @@
 
   inputs = {
     flake-utils.url = "github:numtide/flake-utils";
-    # Nixpkgs with Wine 9.16
-    # Wine 9.16 is required because the game won't even start on Wine 9.17+. my best guess is that
-    # something related to exception handling hooks broke in Wine 9.16, most likely KiUserExceptionDispatcher:
-    # https://www.unknowncheats.me/forum/league-of-legends/620637-packman-stub-dll-hooks-ntdll-dll-v14-1-a.html
-    nixpkgs.url = "github:NixOS/nixpkgs?ref=448c32f75aaee222908abd3a8ec84172b3f040bf";
+    nixpkgs.url = "github:NixOS/nixpkgs?ref=15f4ee454b1dce334612fa6843b3e05cf546efab";
   };
 
   outputs = { self, flake-utils, nixpkgs }:
@@ -19,23 +15,66 @@
           inherit system;
         };
       in with pkgs; {
-        packages.wine = (wineWowPackages.staging.overrideAttrs (oldAttrs: {
-          patches = oldAttrs.patches ++ [
-            # those are patches specific to league
-            # ./wine-patches/LoL-broken-client-update-fix.patch
+        packages.wine = (wineWow64Packages.full.overrideAttrs (oldAttrs: {
+          version = "11.4";
+          src = fetchurl {
+            url = "https://dl.winehq.org/wine/source/11.x/wine-11.4.tar.xz";
+            hash = "sha256-GXCkY4HTvCxE1lHQgzY3Dkme64tT3JPL0c5UT3EV5Zg=";
+          };
+          nativeBuildInputs = (oldAttrs.nativeBuildInputs or []) ++ [ autoreconfHook ];
+          patches = [
+            ./wine-patches/wine-11.4-combined.patch
             ./wine-patches/0001-resolve-drive-symlink.patch
-            # ./wine-patches/0001-GetMappedFileName-Return-nt-filename-and-resolve-DOS.patch
+            ./wine-patches/0010-kernelbase-Correct-return-value-in-VirtualProtect-fo.patch
+            ./wine-patches/0011-kernelbase-Handle-NULL-old_prot-parameter-in-Virtual.patch
             ./wine-patches/LoL-client-slow-start-fix.patch
-            ./wine-patches/LoL-ntdll-fix-signal-set-full-context.patch
-            ./wine-patches/ntdll-implement-ntcontinueex-wine-9.16.patch
-            ./wine-patches/LoL-ntdll-nopguard-call_vectored_handlers.patch
-            # those two fix an error while creating a X11 window with client windows. not sure if they're needed?
-            ./wine-patches/6398.patch
-            ./wine-patches/6467.patch
-            # those fix a regression in Wine 9.16-9.17 which makes CEF applications not work correctly.
-            ./wine-patches/ntdll-WRITECOPY/0010-kernelbase-Correct-return-value-in-VirtualProtect-fo.patch
-            ./wine-patches/ntdll-WRITECOPY/0011-kernelbase-Handle-NULL-old_prot-parameter-in-Virtual.patch
           ];
+          preConfigure = (oldAttrs.preConfigure or "") + ''
+            patchShebangs tools
+            autoreconf -f
+          '';
         }));
+
+        devShells.default = mkShell {
+          nativeBuildInputs = [
+            bison flex fontforge pkg-config autoconf hexdump perl python3 gitMinimal gettext
+            pkgsCross.mingw32.buildPackages.gcc
+            pkgsCross.mingwW64.buildPackages.gcc
+          ];
+
+          buildInputs = [
+            freetype perl libunwind libcap
+            cups dbus cairo ncurses sane-backends libpulseaudio udev
+            libxinerama vulkan-loader SDL2 libusb1 ffmpeg-headless
+            openssl gnutls
+            libGLU libGL libdrm
+            alsa-lib
+            fontconfig
+            libx11 libxcomposite libxcursor libxext libxfixes libxi libxrandr libxrender libxxf86vm
+            wayland wayland-scanner libxkbcommon wayland-protocols libgbm
+          ];
+
+          hardeningDisable = [ "bindnow" "stackclashprotection" "format" ];
+
+          NIX_LDFLAGS = builtins.toString ([
+            "-rpath ${lib.makeLibraryPath ([
+              stdenv.cc.cc freetype perl libunwind libcap
+              cups dbus cairo ncurses sane-backends libpulseaudio udev
+              libxinerama vulkan-loader SDL2 libusb1 ffmpeg-headless
+              openssl gnutls libGLU libGL libdrm alsa-lib fontconfig
+              libx11 libxcomposite libxcursor libxext libxfixes libxi libxrandr libxrender libxxf86vm
+              wayland libxkbcommon libgbm
+            ] ++ [ stdenv.cc.cc.lib ])}"
+          ]);
+
+          shellHook = ''
+            export WINE_SRC=$(pwd)/build/wine-src
+            export WINE_BUILD=$(pwd)/build/wine-build
+            export WINE_PREFIX=$(pwd)/build/wine-install
+            echo "=== Wine Development Environment ==="
+            echo "Run './build-wine.sh' to build Wine 11.4 with patches"
+            echo "Run './test-wine.sh' to test with LoL replay"
+          '';
+        };
     });
 }

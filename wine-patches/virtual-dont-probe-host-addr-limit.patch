@@ -1,0 +1,22 @@
+From: virtual.c host address space probing fix
+Subject: ntdll: Don't probe host address space limit on x86_64
+
+Use the static address_space_limit value on x86_64 instead of dynamically
+probing with mmap, which causes ~30+ ENOMEM failures per process probing
+into kernel address space. This triggers memory map state corruption that
+leads to a NULL-pointer double-fault crash after the anti-cheat breakpoint
+in League of Legends.
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 111849d..8666895 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3654,7 +3654,7 @@ void virtual_init(void)
+     TRACE( "host page size: %uk\n", (UINT)host_page_size / 1024 );
+ #endif
+ 
+-#ifdef _WIN64
++#ifdef __aarch64__
+     host_addr_space_limit = get_host_addr_space_limit();
+     TRACE( "host addr space limit: %p\n", host_addr_space_limit );
+ #else

@@ -1,0 +1,44 @@
+From: Wine Staging
+Subject: Fix bool keyword conflict in sysparams.c
+---
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index 1111111..2222222 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -266,7 +266,7 @@ struct sysparam_bool_entry
+ };
+ 
+ union sysparam_all_entry {
+-    struct sysparam_bool_entry   bool;
++    struct sysparam_bool_entry   boolean;
+     struct sysparam_dword_entry  dword;
+     struct sysparam_string_entry  string;
+     struct sysparam_binary_entry  binary;
+@@ -4074,9 +4074,9 @@ static BOOL get_bool_entry( union sysparam_all_entry *entry, UINT int_param, voi
+     if (entry->hdr.dirty)
+     {
+         if (load_entry( &entry->hdr, buf, sizeof(buf) ))
+-            entry->bool.val = wcstol( buf, NULL, 10 ) != 0;
++            entry->boolean.val = wcstol( buf, NULL, 10 ) != 0;
+     }
+-    *(UINT *)ptr_param = entry->bool.val;
++    *(UINT *)ptr_param = entry->boolean.val;
+     return TRUE;
+ }
+ 
+@@ -4085,7 +4085,7 @@ static BOOL set_bool_entry( union sysparam_all_entry *entry, UINT int_param, voi
+ {
+     if (!entry->hdr.dirty) save_entry( &entry->hdr, NULL, 0, int_param, flags );
+     if (!(flags & SPIF_UPDATEINIFILE)) return TRUE;
+-    entry->bool.val = int_param != 0;
++    entry->boolean.val = int_param != 0;
+     return TRUE;
+ }
+ 
+@@ -4093,7 +4093,7 @@ static BOOL init_bool_entry( union sysparam_all_entry *entry )
+ {
+     WCHAR buf[] = { entry->bool.val ? '1' : '0', 0 };
+     return init_entry_string( &entry->hdr, buf );
+-}
++    { .bool = { { get_bool_entry, set_bool_entry, init_bool_entry, base, reg }, (val) } }
++    { .boolean = { { get_bool_entry, set_bool_entry, init_bool_entry, base, reg }, (val) } }

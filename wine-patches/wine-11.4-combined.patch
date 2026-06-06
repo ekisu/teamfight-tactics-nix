@@ -1,0 +1,493 @@
+diff --git a/configure.ac b/configure.ac
+index f63669df19..aee67122c2 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -694,6 +694,7 @@ AC_CHECK_HEADERS(\
+ 	linux/memfd.h \
+ 	linux/ntsync.h \
+ 	linux/param.h \
++	linux/seccomp.h \
+ 	linux/serial.h \
+ 	linux/types.h \
+ 	linux/ucdrom.h \
+diff --git a/dlls/kernel32/tests/virtual.c b/dlls/kernel32/tests/virtual.c
+index 4bf3bbbf29..3a816a3f64 100644
+--- a/dlls/kernel32/tests/virtual.c
++++ b/dlls/kernel32/tests/virtual.c
+@@ -3843,9 +3843,7 @@ static void test_CreateFileMapping_protection(void)
+                 SetLastError(0xdeadbeef);
+                 ret = VirtualQuery(base, &info, sizeof(info));
+                 ok(ret, "VirtualQuery failed %ld\n", GetLastError());
+-                /* FIXME: remove the condition below once Wine is fixed */
+-                todo_wine_if (td[i].prot == PAGE_WRITECOPY || td[i].prot == PAGE_EXECUTE_WRITECOPY)
+-                    ok(info.Protect == td[i].prot_after_write, "%ld: got %#lx != expected %#lx\n", i, info.Protect, td[i].prot_after_write);
++                ok(info.Protect == td[i].prot_after_write, "%ld: got %#lx != expected %#lx\n", i, info.Protect, td[i].prot_after_write);
+             }
+         }
+         else
+@@ -3859,9 +3857,7 @@ static void test_CreateFileMapping_protection(void)
+         SetLastError(0xdeadbeef);
+         ret = VirtualProtect(base, si.dwPageSize, PAGE_NOACCESS, &old_prot);
+         ok(ret, "%ld: VirtualProtect error %ld\n", i, GetLastError());
+-        /* FIXME: remove the condition below once Wine is fixed */
+-        todo_wine_if (td[i].prot == PAGE_WRITECOPY || td[i].prot == PAGE_EXECUTE_WRITECOPY)
+-            ok(old_prot == td[i].prot_after_write, "%ld: got %#lx != expected %#lx\n", i, old_prot, td[i].prot_after_write);
++        ok(old_prot == td[i].prot_after_write, "%ld: got %#lx != expected %#lx\n", i, old_prot, td[i].prot_after_write);
+ 
+         UnmapViewOfFile(base);
+     }
+@@ -4357,7 +4353,6 @@ static void test_mappings(void)
+     SetFilePointer(hfile, 0, NULL, FILE_BEGIN);
+     ok(ReadFile(hfile, &data, sizeof(data), &num_bytes, NULL), "ReadFile failed\n");
+     ok(num_bytes == sizeof(data), "num_bytes = %ld\n", num_bytes);
+-    todo_wine
+     ok(!data, "data = %lx\n", data);
+ 
+     CloseHandle( hfile );
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index ccda16cc14..cc02deb86f 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -1868,6 +1868,7 @@ static void start_main_thread(void)
+     set_load_order_app_name( main_wargv[0] );
+     init_thread_stack( teb, 0, 0, 0 );
+     NtCreateKeyedEvent( &keyed_event, GENERIC_READ | GENERIC_WRITE, NULL, 0 );
++    signal_init_process();
+     load_ntdll();
+     load_wow64_ntdll( main_image_info.Machine );
+     load_apiset_dll();
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index c04328c856..166b59ea42 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -301,9 +301,17 @@ unsigned int server_call_unlocked( void *req_ptr )
+  */
+ unsigned int CDECL wine_server_call( void *req_ptr )
+ {
++    struct __server_request_info * const req = req_ptr;
+     sigset_t old_set;
+     unsigned int ret;
+ 
++    /* trigger write watches, otherwise read() might return EFAULT */
++    if (req->u.req.request_header.reply_size &&
++        !virtual_check_buffer_for_write( req->reply_data, req->u.req.request_header.reply_size ))
++    {
++        return STATUS_ACCESS_VIOLATION;
++    }
++
+     pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
+     ret = server_call_unlocked( req_ptr );
+     pthread_sigmask( SIG_SETMASK, &old_set, NULL );
+diff --git a/dlls/ntdll/unix/signal_i386.c b/dlls/ntdll/unix/signal_i386.c
+index 59be0f0771..7e0b335893 100644
+--- a/dlls/ntdll/unix/signal_i386.c
++++ b/dlls/ntdll/unix/signal_i386.c
+@@ -693,7 +693,10 @@ static inline void *init_handler( const ucontext_t *sigcontext )
+     {
+         struct x86_thread_data *thread_data = (struct x86_thread_data *)&teb->GdiTebBatch;
+         set_fs( thread_data->fs );
+-        set_gs( thread_data->gs );
++        /* FIXME ZF: This is a bit of a hack, but it doesn't matter,
++         * since this patch set goes in the wrong direction anyway. */
++        if (thread_data->gs)
++            set_gs( thread_data->gs );
+     }
+ #endif
+ 
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 740df80341..edce7df44e 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -27,6 +27,7 @@
+ #include "config.h"
+ 
+ #include <assert.h>
++#include <errno.h>
+ #include <pthread.h>
+ #include <signal.h>
+ #include <stdlib.h>
+@@ -34,6 +35,8 @@
+ #include <stdio.h>
+ #include <sys/types.h>
+ #include <sys/mman.h>
++#include <sys/stat.h>
++#include <fcntl.h>
+ #include <unistd.h>
+ #ifdef HAVE_MACHINE_SYSARCH_H
+ # include <machine/sysarch.h>
+@@ -73,6 +76,14 @@
+ extern void _thread_set_tsd_base(uint64_t);
+ #endif
+ 
++#if defined(HAVE_LINUX_FILTER_H) && defined(HAVE_LINUX_SECCOMP_H) && defined(HAVE_SYS_PRCTL_H)
++#define HAVE_SECCOMP 1
++# include <linux/filter.h>
++# include <linux/seccomp.h>
++# include <sys/prctl.h>
++# include <linux/audit.h>
++#endif
++
+ #include "ntstatus.h"
+ #include "windef.h"
+ #include "winternl.h"
+@@ -1083,7 +1094,8 @@ NTSTATUS signal_set_full_context( CONTEXT *context )
+ {
+     NTSTATUS status = NtSetContextThread( GetCurrentThread(), context );
+ 
+-    if (!status && (context->ContextFlags & CONTEXT_INTEGER) == CONTEXT_INTEGER)
++    unsigned int real_mask = CONTEXT_INTEGER & ~CONTEXT_AMD64;
++    if (!status && (context->ContextFlags & real_mask) == real_mask)
+         get_syscall_frame()->restore_flags |= CONTEXT_INTEGER;
+     return status;
+ }
+@@ -2012,6 +2024,194 @@ static inline DWORD is_privileged_instr( CONTEXT *context )
+     return 0;
+ }
+ 
++#ifdef HAVE_SECCOMP
++static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
++{
++    extern const void *__wine_syscall_dispatcher_prolog_end_ptr;
++    struct syscall_frame *frame = get_syscall_frame();
++    ucontext_t *ctx = sigcontext;
++
++    TRACE_(seh)("SIGSYS, rax %#llx, rip %#llx.\n", ctx->uc_mcontext.gregs[REG_RAX],
++            ctx->uc_mcontext.gregs[REG_RIP]);
++
++    if (ctx->uc_mcontext.gregs[REG_RAX] == 0xffff)
++    {
++        /* Test syscall from the Unix side (install_bpf). */
++        ctx->uc_mcontext.gregs[REG_RAX] = STATUS_INVALID_PARAMETER;
++        return;
++    }
++
++    frame->rip = ctx->uc_mcontext.gregs[REG_RIP] + 0xb;
++    frame->rcx = ctx->uc_mcontext.gregs[REG_RIP];
++    frame->eflags = ctx->uc_mcontext.gregs[REG_EFL];
++    frame->restore_flags = 0;
++    ctx->uc_mcontext.gregs[REG_RCX] = (ULONG_PTR)frame;
++    ctx->uc_mcontext.gregs[REG_R11] = frame->eflags;
++    ctx->uc_mcontext.gregs[REG_EFL] &= ~0x100;  /* clear single-step flag */
++    ctx->uc_mcontext.gregs[REG_RIP] = (ULONG64)__wine_syscall_dispatcher_prolog_end_ptr;
++}
++#endif
++
++#ifdef HAVE_SECCOMP
++static int sc_seccomp(unsigned int operation, unsigned int flags, void *args)
++{
++#ifndef __NR_seccomp
++#   define __NR_seccomp 317
++#endif
++    return syscall(__NR_seccomp, operation, flags, args);
++}
++#endif
++
++static void check_bpf_jit_enable(void)
++{
++    char enabled;
++    int fd;
++
++    fd = open("/proc/sys/net/core/bpf_jit_enable", O_RDONLY);
++    if (fd == -1)
++    {
++        WARN_(seh)("Could not open /proc/sys/net/core/bpf_jit_enable.\n");
++        return;
++    }
++
++    if (read(fd, &enabled, sizeof(enabled)) == sizeof(enabled))
++    {
++        TRACE_(seh)("enabled %#x.\n", enabled);
++
++        if (enabled != '1')
++            ERR_(seh)("BPF JIT is not enabled in the kernel, enable it to reduce syscall emulation overhead.\n");
++    }
++    else
++    {
++        WARN_(seh)("Could not read /proc/sys/net/core/bpf_jit_enable.\n");
++    }
++    close(fd);
++}
++
++static void install_bpf(struct sigaction *sig_act)
++{
++#ifdef HAVE_SECCOMP
++#   ifndef SECCOMP_FILTER_FLAG_SPEC_ALLOW
++#       define SECCOMP_FILTER_FLAG_SPEC_ALLOW (1UL << 2)
++#   endif
++
++#   ifndef SECCOMP_SET_MODE_FILTER
++#       define SECCOMP_SET_MODE_FILTER 1
++#   endif
++    static const BYTE syscall_trap_test[] =
++    {
++        0x48, 0x89, 0xf8,   /* mov %rdi, %rax */
++        0x0f, 0x05,         /* syscall */
++        0xc3,               /* retq */
++    };
++    static const unsigned int flags = SECCOMP_FILTER_FLAG_SPEC_ALLOW;
++
++#define NATIVE_SYSCALL_ADDRESS_START 0x700000000000
++
++    static struct sock_filter filter[] =
++    {
++        /* Allow i386. */
++        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
++        BPF_JUMP (BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
++        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
++        /* Native libs are loaded at high addresses. */
++        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer) + 4),
++        BPF_JUMP(BPF_JMP | BPF_JGT | BPF_K, NATIVE_SYSCALL_ADDRESS_START >> 32, 0, 8),
++        /* High addresses may be top-down allocations, trap those */
++        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x7fff, 1, 0),
++        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
++        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),
++        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0xfe000000, 1, 0),
++        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
++        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0xffff0000, 0, 1),
++        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
++        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
++        /* Allow wine64-preloader */
++        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, instruction_pointer)),
++        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x7d400000, 1, 0),
++        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
++        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x7d402000, 0, 1),
++        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
++        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
++    };
++    long (*test_syscall)(long sc_number);
++    struct syscall_frame *frame = get_syscall_frame();
++    struct sock_fprog prog;
++    NTSTATUS status;
++
++    if ((ULONG_PTR)sc_seccomp < NATIVE_SYSCALL_ADDRESS_START
++            || (ULONG_PTR)syscall < NATIVE_SYSCALL_ADDRESS_START)
++    {
++        ERR_(seh)("Native libs are being loaded in low addresses, sc_seccomp %p, syscall %p, not installing seccomp.\n",
++                sc_seccomp, syscall);
++        ERR_(seh)("The known reasons are /proc/sys/vm/legacy_va_layout set to 1 or 'ulimit -s' being 'unlimited'.\n");
++        return;
++    }
++
++    sig_act->sa_sigaction = sigsys_handler;
++    memset(&prog, 0, sizeof(prog));
++
++    sigaction(SIGSYS, sig_act, NULL);
++
++
++
++
++    test_syscall = mmap((void *)0x600000000000, 0x1000, PROT_EXEC | PROT_READ | PROT_WRITE,
++            MAP_PRIVATE | MAP_ANON, -1, 0);
++    if (test_syscall != (void *)0x600000000000)
++    {
++        int ret;
++
++        ERR("Could not allocate test syscall, falling back to seccomp presence check, test_syscall %p, errno %d.\n",
++                test_syscall, errno);
++        if (test_syscall != MAP_FAILED) munmap(test_syscall, 0x1000);
++
++        if ((ret = prctl(PR_GET_SECCOMP, 0, NULL, 0, 0)))
++        {
++            if (ret == 2)
++                TRACE_(seh)("Seccomp filters already installed.\n");
++            else
++                ERR_(seh)("Seccomp filters cannot be installed, ret %d, error %s.\n", ret, strerror(errno));
++            return;
++        }
++    }
++    else
++    {
++        memcpy(test_syscall, syscall_trap_test, sizeof(syscall_trap_test));
++        status = test_syscall(0xffff);
++        munmap(test_syscall, 0x1000);
++        if (status == STATUS_INVALID_PARAMETER)
++        {
++            TRACE_(seh)("Seccomp filters already installed.\n");
++            return;
++        }
++        if (status != -ENOSYS && (status != -1 || errno != ENOSYS))
++        {
++            ERR_(seh)("Unexpected status %#x, errno %d.\n", status, errno);
++            return;
++        }
++    }
++
++    TRACE_(seh)("Installing seccomp filters.\n");
++
++    prog.len = ARRAY_SIZE(filter);
++    prog.filter = filter;
++
++    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
++    {
++        ERR_(seh)("prctl(PR_SET_NO_NEW_PRIVS, ...): %s.\n", strerror(errno));
++        return;
++    }
++    if (sc_seccomp(SECCOMP_SET_MODE_FILTER, flags, &prog))
++    {
++        ERR_(seh)("prctl(PR_SET_SECCOMP, ...): %s.\n", strerror(errno));
++        return;
++    }
++    check_bpf_jit_enable();
++#else
++    WARN_(seh)("Built without seccomp.\n");
++#endif
++}
+ 
+ /***********************************************************************
+  *           handle_interrupt
+@@ -2879,10 +3079,14 @@ void signal_init_process(void)
+     if (sigaction( SIGSEGV, &sig_act, NULL ) == -1) goto error;
+     if (sigaction( SIGILL, &sig_act, NULL ) == -1) goto error;
+     if (sigaction( SIGBUS, &sig_act, NULL ) == -1) goto error;
++
+ #ifdef __APPLE__
+     sig_act.sa_sigaction = sigsys_handler;
+     if (sigaction( SIGSYS, &sig_act, NULL ) == -1) goto error;
+ #endif
++
++    install_bpf(&sig_act);
++
+     return;
+ 
+  error:
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index 22f8b49622..d26f1cf5cb 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -3625,7 +3625,7 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+ 
+         if (size >= len)
+         {
+-            if (!info) ret = STATUS_ACCESS_VIOLATION;
++            if (!info || !virtual_check_buffer_for_write( info, len )) ret = STATUS_ACCESS_VIOLATION;
+             else
+             {
+                 FIXME("SystemRegistryQuotaInformation: faking max registry size of 32 MB\n");
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 781598fced..8d1294711d 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -138,6 +138,7 @@ struct file_view
+ #define VPROT_GUARD      0x10
+ #define VPROT_COMMITTED  0x20
+ #define VPROT_WRITEWATCH 0x40
++#define VPROT_WRITTEN    0x80
+ /* per-mapping protection flags */
+ #define VPROT_ARM64EC          0x0100  /* view may contain ARM64EC code */
+ #define VPROT_SYSTEM           0x0200  /* system view (underlying mmap not under our control) */
+@@ -698,6 +699,21 @@ static void reserve_area( void *addr, void *end )
+ #endif /* __APPLE__ */
+ }
+ 
++/* This might look like a hack, but it actually isn't - the 'experimental' version
++ * is correct, but it already has revealed a couple of additional Wine bugs, which
++ * were not triggered before, and there are probably some more.
++ * To avoid breaking Wine for everyone, the new correct implementation has to be
++ * manually enabled, until it is tested a bit more. */
++static inline BOOL experimental_WRITECOPY( void )
++{
++    static int enabled = -1;
++    if (enabled == -1)
++    {
++        const char *str = getenv("STAGING_WRITECOPY");
++        enabled = str && (atoi(str) != 0);
++    }
++    return enabled;
++}
+ 
+ static void mmap_init( const struct preload_info *preload_info )
+ {
+@@ -1366,8 +1382,19 @@ static int get_unix_prot( BYTE vprot )
+     {
+         if (vprot & VPROT_READ) prot |= PROT_READ;
+         if (vprot & VPROT_WRITE) prot |= PROT_WRITE | PROT_READ;
+-        if (vprot & VPROT_WRITECOPY) prot |= PROT_WRITE | PROT_READ;
+         if (vprot & VPROT_EXEC) prot |= PROT_EXEC | PROT_READ;
++#if defined(__i386__)
++        if (vprot & VPROT_WRITECOPY)
++        {
++            if (experimental_WRITECOPY() && !(vprot & VPROT_WRITTEN))
++                prot = (prot & ~PROT_WRITE) | PROT_READ;
++            else
++                prot |= PROT_WRITE | PROT_READ;
++        }
++#else
++        /* FIXME: Architecture needs implementation of signal_init_early. */
++        if (vprot & VPROT_WRITECOPY) prot |= PROT_WRITE | PROT_READ;
++#endif
+         if (vprot & VPROT_WRITEWATCH) prot &= ~PROT_WRITE;
+     }
+     if (!prot) prot = PROT_NONE;
+@@ -1874,7 +1901,11 @@ static NTSTATUS create_view( struct file_view **view_ret, void *base, size_t siz
+  */
+ static DWORD get_win32_prot( BYTE vprot, unsigned int map_prot )
+ {
+-    DWORD ret = VIRTUAL_Win32Flags[vprot & 0x0f];
++    DWORD ret;
++
++    if ((vprot & VPROT_WRITECOPY) && (vprot & VPROT_WRITTEN))
++        vprot = (vprot & ~VPROT_WRITECOPY) | VPROT_WRITE;
++    ret = VIRTUAL_Win32Flags[vprot & 0x0f];
+     if (vprot & VPROT_GUARD) ret |= PAGE_GUARD;
+     if (map_prot & SEC_NOCACHE) ret |= PAGE_NOCACHE;
+     return ret;
+@@ -2050,7 +2081,7 @@ static void update_write_watches( void *base, size_t size, size_t accessed_size
+ {
+     TRACE( "updating watch %p-%p-%p\n", base, (char *)base + accessed_size, (char *)base + size );
+     /* clear write watch flag on accessed pages */
+-    set_page_vprot_bits( base, accessed_size, 0, VPROT_WRITEWATCH );
++    set_page_vprot_bits( base, accessed_size, VPROT_WRITE, VPROT_WRITEWATCH | VPROT_WRITECOPY );
+     /* restore page protections on the entire range */
+     mprotect_range( base, size, 0, 0 );
+ }
+@@ -4681,11 +4712,16 @@ static NTSTATUS check_write_access( void *base, size_t size, BOOL *has_write_wat
+     {
+         BYTE vprot = get_host_page_vprot( addr + i );
+         if (vprot & VPROT_WRITEWATCH) *has_write_watch = TRUE;
++        if (vprot & VPROT_WRITECOPY)
++        {
++            vprot = (vprot & ~VPROT_WRITECOPY) | VPROT_WRITE;
++            *has_write_watch = TRUE;
++        }
+         if (!(get_unix_prot( vprot & ~VPROT_WRITEWATCH ) & PROT_WRITE))
+             return STATUS_INVALID_USER_BUFFER;
+     }
+     if (*has_write_watch)
+-        mprotect_range( addr, size, 0, VPROT_WRITEWATCH );  /* temporarily enable write access */
++        mprotect_range( addr, size, VPROT_WRITE, VPROT_WRITEWATCH | VPROT_WRITECOPY );  /* temporarily enable write access */
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -5938,7 +5974,7 @@ static void fill_working_set_info( struct fill_working_set_info_data *d, struct
+         pagemap = d->pm_buffer[page - d->buffer_start];
+ 
+         p->VirtualAttributes.Valid = !(vprot & VPROT_GUARD) && (vprot & 0x0f) && (pagemap >> 63);
+-        p->VirtualAttributes.Shared = !is_view_valloc( view ) && ((pagemap >> 61) & 1);
++        p->VirtualAttributes.Shared = (!is_view_valloc( view ) && ((pagemap >> 61) & 1)) || ((view->protect & VPROT_WRITECOPY) && !(vprot & VPROT_WRITTEN));
+         if (p->VirtualAttributes.Shared && p->VirtualAttributes.Valid)
+             p->VirtualAttributes.ShareCount = 1; /* FIXME */
+         if (p->VirtualAttributes.Valid)
+diff --git a/dlls/psapi/tests/psapi_main.c b/dlls/psapi/tests/psapi_main.c
+index 7bf67d0b33..7b0c85fa57 100644
+--- a/dlls/psapi/tests/psapi_main.c
++++ b/dlls/psapi/tests/psapi_main.c
+@@ -1271,6 +1271,9 @@ static void test_QueryWorkingSetEx(void)
+     check_QueryWorkingSetEx(addr, "exe,readonly1", 0, 0, 1, TRUE);
+ 
+     *(volatile char *)addr;
++    check_QueryWorkingSetEx(addr, "exe,readonly2", 1, PAGE_READONLY, 1, FALSE);
++
++    ret = VirtualProtect(addr, 0x1000, PAGE_EXECUTE_READWRITE, &prot);
+     ok(ret, "VirtualProtect failed with %ld\n", GetLastError());
+     check_QueryWorkingSetEx(addr, "exe,readonly2", 1, PAGE_READONLY, 1, FALSE);
+ 
+diff --git a/tools/make_requests b/tools/make_requests
+index 17e425537b..d648d1825a 100755
+--- a/tools/make_requests
++++ b/tools/make_requests
+@@ -1,4 +1,4 @@
+-#! /usr/bin/perl -w
++#!/usr/bin/env perl
+ #
+ # Build the server protocol definitions
+ # from the contents of server/protocol.def.
