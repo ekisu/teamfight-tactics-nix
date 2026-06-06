@@ -63,6 +63,8 @@ apply_staging() {
     # patchinstall.py needs git repo
     if [ ! -d .git ]; then
         git init -q
+        git config user.email "ci@wine-build.local"
+        git config user.name "Wine CI"
         git add -A
         git commit -q -m "clean wine source"
     fi
