@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WINE_VERSION="${WINE_VERSION:-11.4}"
+DXVK_VERSION="${DXVK_VERSION:-2.7.1}"
+VKD3D_VERSION="${VKD3D_VERSION:-3.0.1}"
 
 # Wine 11.x series mapping
 WINE_SERIES="11.x"
@@ -186,6 +188,47 @@ install_wine() {
 }
 
 # ---------------------------------------------------------------------------
+# Bundle DXVK and VKD3D-proton DLLs into the wine install tree
+# ---------------------------------------------------------------------------
+bundle_dxvk() {
+    local share="$INSTALL_DIR/$PREFIX/share"
+
+    # --- DXVK ---
+    echo ">>> Bundling DXVK ${DXVK_VERSION}..."
+    local dxvk_url="https://github.com/doitsujin/dxvk/releases/download/v${DXVK_VERSION}/dxvk-${DXVK_VERSION}.tar.gz"
+    local dxvk_tmp="$BUILD_DIR/dxvk-${DXVK_VERSION}"
+
+    curl -L --retry 3 "$dxvk_url" | tar xz -C "$BUILD_DIR"
+
+    mkdir -p "$share/dxvk/x64" "$share/dxvk/x32"
+    for f in d3d9.dll d3d10core.dll d3d11.dll dxgi.dll; do
+        cp "$dxvk_tmp/x64/$f" "$share/dxvk/x64/"
+        cp "$dxvk_tmp/x32/$f" "$share/dxvk/x32/"
+    done
+    rm -rf "$dxvk_tmp"
+    echo ">>> DXVK ${DXVK_VERSION} bundled"
+
+    # --- VKD3D-proton ---
+    echo ">>> Bundling vkd3d-proton ${VKD3D_VERSION}..."
+    local vkd3d_url="https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v${VKD3D_VERSION}/vkd3d-proton-${VKD3D_VERSION}.tar.zst"
+    local vkd3d_tmp="$BUILD_DIR/vkd3d-proton-${VKD3D_VERSION}"
+
+    curl -L --retry 3 "$vkd3d_url" | zstd -d | tar x -C "$BUILD_DIR"
+
+    mkdir -p "$share/vkd3d-proton/x64" "$share/vkd3d-proton/x32"
+    for f in d3d12.dll d3d12core.dll; do
+        if [ -f "$vkd3d_tmp/x64/$f" ]; then
+            cp "$vkd3d_tmp/x64/$f" "$share/vkd3d-proton/x64/"
+        fi
+        if [ -f "$vkd3d_tmp/x32/$f" ]; then
+            cp "$vkd3d_tmp/x32/$f" "$share/vkd3d-proton/x32/"
+        fi
+    done
+    rm -rf "$vkd3d_tmp"
+    echo ">>> vkd3d-proton ${VKD3D_VERSION} bundled"
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 fetch_source
@@ -196,6 +239,7 @@ apply_custom_patches
 configure_wine
 build_wine
 install_wine
+bundle_dxvk
 
 echo ""
 echo "=== Build Complete ==="

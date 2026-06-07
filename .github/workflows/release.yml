@@ -40,7 +40,7 @@ jobs:
           # Build tools
           sudo apt-get install -y \
             autoconf bison flex gcc g++ git perl python3 curl \
-            ccache gettext pkg-config make
+            ccache gettext pkg-config make zstd
 
           # Cross-compilation for Windows PE binaries (wow64)
           sudo apt-get install -y \
