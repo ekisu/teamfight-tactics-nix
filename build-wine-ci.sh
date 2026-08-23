@@ -2,14 +2,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WINE_VERSION="${WINE_VERSION:-11.4}"
+WINE_VERSION="${WINE_VERSION:-11.15}"
+WINE_TAG_COMMIT="2df1ee28039cf84776eb1421ed90bd154cebb65f"
+WINE_SHA256="5046f36dae210b198ea69792774d4401feed975d465eca6c251c9394400ec272"
+STAGING_TAG_COMMIT="634865f9e409c7101adc6809f23af34d2a668525"
+STAGING_REPOSITORY="https://gitlab.winehq.org/wine/wine-staging.git"
 DXVK_VERSION="${DXVK_VERSION:-2.7.1}"
+DXVK_SHA256="d85ce7c79f57ecd765aaa1b9e7007cb875e6fde9f6d331df799bce73d513ce87"
 VKD3D_VERSION="${VKD3D_VERSION:-3.0.1}"
+VKD3D_SHA256="3cf2315522af5e43605ef6d3c41dad91387040bf97199934f3f7ab76caaa2f0c"
 
-# Wine 11.x series mapping
 WINE_SERIES="11.x"
 WINE_URL="https://dl.winehq.org/wine/source/${WINE_SERIES}/wine-${WINE_VERSION}.tar.xz"
-STAGING_URL="https://gitlab.winehq.org/wine/wine-staging/-/archive/v${WINE_VERSION}/wine-staging-v${WINE_VERSION}.tar.gz"
+
+if [ "$WINE_VERSION" != "11.15" ]; then
+    echo "ERROR: this build definition and its patches are pinned to Wine 11.15" >&2
+    exit 2
+fi
 
 BUILD_DIR="/tmp/wine-build-ci"
 SRC_DIR="$BUILD_DIR/wine-src"
@@ -19,6 +28,15 @@ PREFIX="/opt/wine"
 PATCHES_DIR="$SCRIPT_DIR/wine-patches"
 
 JOBS="$(nproc)"
+
+if [ -d /usr/lib/ccache ]; then
+    export CCACHE_DIR="${CCACHE_DIR:-$HOME/.cache/ccache}"
+    export PATH="/usr/lib/ccache:$PATH"
+    ccache -z
+    echo "ccache: enabled (dir=$CCACHE_DIR)"
+else
+    echo "ccache: not available, skipping"
+fi
 
 echo "=== Wine CI Build ==="
 echo "Version:  ${WINE_VERSION}"
@@ -33,19 +51,25 @@ mkdir -p "$BUILD_DIR"
 # Fetch Wine source
 # ---------------------------------------------------------------------------
 fetch_source() {
+    local archive="$BUILD_DIR/wine-${WINE_VERSION}.tar.xz"
     echo ">>> Downloading Wine ${WINE_VERSION} from ${WINE_URL}"
-    curl -L --retry 3 "$WINE_URL" | tar xJ -C "$BUILD_DIR"
+    curl -fL --retry 3 -o "$archive" "$WINE_URL"
+    echo "$WINE_SHA256  $archive" | sha256sum --check --status
+    tar xJf "$archive" -C "$BUILD_DIR"
     mv "$BUILD_DIR/wine-${WINE_VERSION}" "$SRC_DIR"
+    [ "$(cat "$SRC_DIR/VERSION")" = "Wine version ${WINE_VERSION}" ]
     echo ">>> Wine source ready: $SRC_DIR"
 }
 
 # ---------------------------------------------------------------------------
-# Fetch Wine Staging
+# Fetch the exact accepted Wine Staging revision
 # ---------------------------------------------------------------------------
 fetch_staging() {
-    echo ">>> Downloading Wine Staging ${WINE_VERSION}"
-    curl -L --retry 3 "$STAGING_URL" | tar xz -C "$BUILD_DIR"
-    mv "$BUILD_DIR/wine-staging-v${WINE_VERSION}" "$BUILD_DIR/wine-staging"
+    echo ">>> Fetching Wine Staging ${WINE_VERSION} (${STAGING_TAG_COMMIT})"
+    git clone --quiet --no-checkout "$STAGING_REPOSITORY" "$BUILD_DIR/wine-staging"
+    git -C "$BUILD_DIR/wine-staging" checkout --quiet "$STAGING_TAG_COMMIT"
+    [ "$(git -C "$BUILD_DIR/wine-staging" rev-parse HEAD)" = "$STAGING_TAG_COMMIT" ]
+    [ "$(git -C "$BUILD_DIR/wine-staging" describe --tags --exact-match HEAD)" = "v${WINE_VERSION}" ]
     echo ">>> Wine staging ready"
 }
 
@@ -53,25 +77,24 @@ fetch_staging() {
 # Apply staging patches
 # ---------------------------------------------------------------------------
 apply_staging() {
-    echo ">>> Applying staging patches..."
-    cd "$SRC_DIR"
-    cp -r "$BUILD_DIR/wine-staging/patches" "$BUILD_DIR/wine-staging/staging" .
+    echo ">>> Applying all Wine Staging ${WINE_VERSION} patches..."
 
-    chmod +w patches
-    if head -1 patches/gitapply.sh 2>/dev/null | grep -qv '/usr/bin/env'; then
-        sed -i '1s|.*|#!/bin/bash|' patches/gitapply.sh
+    # patchinstall.py requires its destination to be a git work tree.
+    git -C "$SRC_DIR" init -q
+    git -C "$SRC_DIR" config user.email "ci@wine-build.local"
+    git -C "$SRC_DIR" config user.name "Wine CI"
+    git -C "$SRC_DIR" add -A
+    git -C "$SRC_DIR" commit -q -m "Wine ${WINE_VERSION} pristine source"
+
+    (
+        cd "$BUILD_DIR/wine-staging"
+        python3 ./staging/patchinstall.py --all DESTDIR="$SRC_DIR"
+    )
+
+    if find "$SRC_DIR" -name '*.rej' -print -quit | grep -q .; then
+        echo "ERROR: rejected Wine Staging hunks found" >&2
+        exit 1
     fi
-
-    # patchinstall.py needs git repo
-    if [ ! -d .git ]; then
-        git init -q
-        git config user.email "ci@wine-build.local"
-        git config user.name "Wine CI"
-        git add -A
-        git commit -q -m "clean wine source"
-    fi
-
-    python3 ./staging/patchinstall.py DESTDIR="$PWD" --all
     echo ">>> Staging patches applied"
 }
 
@@ -95,52 +118,34 @@ run_autogen() {
 }
 
 # ---------------------------------------------------------------------------
-# Apply a single patch (skip if already applied)
-# ---------------------------------------------------------------------------
-apply_patch() {
-    local patch="$PATCHES_DIR/$1"
-    if [ -f "$patch" ]; then
-        echo "    Applying $1..."
-        if ! patch -p1 --forward --no-backup-if-mismatch -d "$SRC_DIR" < "$patch"; then
-            echo "    WARNING: $1 failed to apply (may already be included)"
-        fi
-    else
-        echo "    WARNING: $1 not found, skipping"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# Apply custom LoL/TFT patches
+# Apply the exact Wine 11.15 compatibility patch manifest
 # ---------------------------------------------------------------------------
 apply_custom_patches() {
-    echo ">>> Applying custom patches..."
-    cd "$SRC_DIR"
+    local patches=(
+        "0001-ntdll-report-writecopy-image-pages-shared.patch"
+        "0002-ntdll-account-for-pkru-xstate.patch"
+    )
+    local expected_hashes=(
+        "81231df4147caad763bfd255e40cd4b68f0b96992d774ead20588dc3582a45c8"
+        "577fefa399b0c1fa8808ddf8c918f1d217595796bdfb3374055760382cd6a523"
+    )
 
-    # Combined patch for this specific Wine version (bundles several fixes)
-    local combined="$PATCHES_DIR/wine-${WINE_VERSION}-combined.patch"
-    if [ -f "$combined" ]; then
-        echo "    Applying wine-${WINE_VERSION}-combined.patch..."
-        if ! patch -p1 --forward --no-backup-if-mismatch < "$combined"; then
-            echo "    WARNING: combined patch failed (may already be applied)"
-        fi
-    else
-        echo "    NOTE: no combined patch found for version ${WINE_VERSION}"
+    echo ">>> Applying accepted Wine 11.15 TFT compatibility patches..."
+    for i in "${!patches[@]}"; do
+        local patch="$PATCHES_DIR/${patches[$i]}"
+        [ -f "$patch" ] || { echo "ERROR: missing patch ${patches[$i]}" >&2; exit 1; }
+        echo "${expected_hashes[$i]}  $patch" | sha256sum --check --status || {
+            echo "ERROR: checksum mismatch for ${patches[$i]}" >&2
+            exit 1
+        }
+        echo "    Applying ${patches[$i]}"
+        patch -d "$SRC_DIR" -p1 --forward --batch < "$patch"
+    done
+
+    if find "$SRC_DIR" -name '*.rej' -print -quit | grep -q .; then
+        echo "ERROR: rejected custom patch hunks found" >&2
+        exit 1
     fi
-
-    # Individual patches (--forward skips if already applied via combined patch)
-    apply_patch "0001-resolve-drive-symlink.patch"
-    apply_patch "LoL-client-slow-start-fix.patch"
-    apply_patch "LoL-ntdll-fix-signal-set-full-context.patch"
-    apply_patch "LoL-ntdll-nopguard-call_vectored_handlers.patch"
-    apply_patch "0010-kernelbase-Correct-return-value-in-VirtualProtect-fo.patch"
-    apply_patch "0011-kernelbase-Handle-NULL-old_prot-parameter-in-Virtual.patch"
-
-    # VEH debug logging (applied on top of all patches)
-    if [ -f "$SCRIPT_DIR/add-veh-logging.py" ]; then
-        echo "    Adding VEH logging..."
-        python3 "$SCRIPT_DIR/add-veh-logging.py" "$SRC_DIR/dlls/ntdll/exception.c"
-    fi
-
     echo ">>> Custom patches applied"
 }
 
@@ -196,9 +201,12 @@ bundle_dxvk() {
     # --- DXVK ---
     echo ">>> Bundling DXVK ${DXVK_VERSION}..."
     local dxvk_url="https://github.com/doitsujin/dxvk/releases/download/v${DXVK_VERSION}/dxvk-${DXVK_VERSION}.tar.gz"
+    local dxvk_archive="$BUILD_DIR/dxvk-${DXVK_VERSION}.tar.gz"
     local dxvk_tmp="$BUILD_DIR/dxvk-${DXVK_VERSION}"
 
-    curl -L --retry 3 "$dxvk_url" | tar xz -C "$BUILD_DIR"
+    curl -fL --retry 3 -o "$dxvk_archive" "$dxvk_url"
+    echo "$DXVK_SHA256  $dxvk_archive" | sha256sum --check --status
+    tar xzf "$dxvk_archive" -C "$BUILD_DIR"
 
     mkdir -p "$share/dxvk/x64" "$share/dxvk/x32"
     for f in d3d9.dll d3d10core.dll d3d11.dll dxgi.dll; do
@@ -211,9 +219,12 @@ bundle_dxvk() {
     # --- VKD3D-proton ---
     echo ">>> Bundling vkd3d-proton ${VKD3D_VERSION}..."
     local vkd3d_url="https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v${VKD3D_VERSION}/vkd3d-proton-${VKD3D_VERSION}.tar.zst"
+    local vkd3d_archive="$BUILD_DIR/vkd3d-proton-${VKD3D_VERSION}.tar.zst"
     local vkd3d_tmp="$BUILD_DIR/vkd3d-proton-${VKD3D_VERSION}"
 
-    curl -L --retry 3 "$vkd3d_url" | zstd -d | tar x -C "$BUILD_DIR"
+    curl -fL --retry 3 -o "$vkd3d_archive" "$vkd3d_url"
+    echo "$VKD3D_SHA256  $vkd3d_archive" | sha256sum --check --status
+    tar --zstd -xf "$vkd3d_archive" -C "$BUILD_DIR"
 
     mkdir -p "$share/vkd3d-proton/x64" "$share/vkd3d-proton/x32"
     for f in d3d12.dll d3d12core.dll; do
@@ -229,17 +240,68 @@ bundle_dxvk() {
 }
 
 # ---------------------------------------------------------------------------
+# Validate and record the accepted build topology and provenance
+# ---------------------------------------------------------------------------
+validate_and_manifest() {
+    local runtime="$INSTALL_DIR/$PREFIX"
+    local patchsets="$BUILD_DIR/staging-patchsets.txt"
+
+    [ -x "$runtime/bin/wine" ]
+    [ -x "$runtime/bin/wineserver" ]
+    readelf --file-header "$runtime/bin/wine" | grep -Eq 'Class:.*ELF64'
+    [ -f "$runtime/lib/wine/x86_64-unix/ntdll.so" ]
+    [ -f "$runtime/lib/wine/x86_64-windows/ntdll.dll" ]
+    [ -f "$runtime/lib/wine/i386-windows/ntdll.dll" ]
+    [ ! -e "$runtime/lib/wine/i386-unix" ]
+
+    for patchset in "$BUILD_DIR/wine-staging"/patches/*; do
+        [ -d "$patchset" ] || continue
+        if [ -f "$patchset/definition" ] && grep -qi '^disabled: true$' "$patchset/definition"; then
+            continue
+        fi
+        basename "$patchset"
+    done | sort > "$patchsets"
+    [ "$(wc -l < "$patchsets")" -eq 97 ]
+    cp "$patchsets" "$runtime/staging-patchsets.txt"
+
+    cat > "$runtime/build-manifest.txt" <<EOF
+candidate=ubuntu-11.15-staging-working-set-pkru
+wine_version=$WINE_VERSION
+wine_corresponding_tag_commit=$WINE_TAG_COMMIT
+wine_source_sha256=$WINE_SHA256
+staging_tag_commit=$STAGING_TAG_COMMIT
+staging_patchsets=97 enabled patchsets
+custom_patches=0001-ntdll-report-writecopy-image-pages-shared.patch 0002-ntdll-account-for-pkru-xstate.patch
+custom_patch_0001_sha256=81231df4147caad763bfd255e40cd4b68f0b96992d774ead20588dc3582a45c8
+custom_patch_0002_sha256=577fefa399b0c1fa8808ddf8c918f1d217595796bdfb3374055760382cd6a523
+build_topology=unified new WoW64 (x86_64,i386)
+dxvk_version=$DXVK_VERSION
+dxvk_archive_sha256=$DXVK_SHA256
+vkd3d_proton_version=$VKD3D_VERSION
+vkd3d_archive_sha256=$VKD3D_SHA256
+wine_binary_sha256=$(sha256sum "$runtime/bin/wine" | cut -d' ' -f1)
+wineserver_binary_sha256=$(sha256sum "$runtime/bin/wineserver" | cut -d' ' -f1)
+EOF
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 fetch_source
 fetch_staging
-run_autogen
 apply_staging
 apply_custom_patches
+run_autogen
 configure_wine
 build_wine
 install_wine
 bundle_dxvk
+validate_and_manifest
+
+if command -v ccache &>/dev/null; then
+    echo ""
+    ccache -s
+fi
 
 echo ""
 echo "=== Build Complete ==="

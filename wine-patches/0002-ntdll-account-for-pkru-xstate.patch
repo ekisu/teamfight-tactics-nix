@@ -1,0 +1,12 @@
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -497,7 +497,8 @@
+ {
+     static const ULONG64 supported_features = (1 << XSTATE_AVX) | (1 << XSTATE_MPX_BNDREGS) |
+                                               (1 << XSTATE_MPX_BNDCSR) | (1 << XSTATE_AVX512_KMASK) |
+-                                              (1 << XSTATE_AVX512_ZMM_H) | (1 << XSTATE_AVX512_ZMM);
++                                              (1 << XSTATE_AVX512_ZMM_H) | (1 << XSTATE_AVX512_ZMM) |
++                                              (1 << 9) /* PKRU */;
+     ULONG64 supported_mask;
+     unsigned int i, off, regs[4];
+

@@ -14,20 +14,38 @@
         pkgs = import nixpkgs {
           inherit system;
         };
+        wineStaging = pkgs.fetchzip {
+          url = "https://gitlab.winehq.org/wine/wine-staging/-/archive/634865f9e409c7101adc6809f23af34d2a668525/wine-staging-634865f9e409c7101adc6809f23af34d2a668525.tar.gz";
+          hash = "sha256-/mu7seIsrkXzfJjIzyrMavBT6ZC8Gz/6PZPm9TjjekE=";
+        };
       in with pkgs; {
         packages.wine = (wineWow64Packages.full.overrideAttrs (oldAttrs: {
-          version = "11.4";
+          version = "11.15";
           src = fetchurl {
-            url = "https://dl.winehq.org/wine/source/11.x/wine-11.4.tar.xz";
-            hash = "sha256-GXCkY4HTvCxE1lHQgzY3Dkme64tT3JPL0c5UT3EV5Zg=";
+            url = "https://dl.winehq.org/wine/source/11.x/wine-11.15.tar.xz";
+            hash = "sha256-UEbzba4hCxmOppeSd01EAf7tl11GXspsJRyTlEAOwnI=";
           };
-          nativeBuildInputs = (oldAttrs.nativeBuildInputs or []) ++ [ autoreconfHook ];
+          nativeBuildInputs = (oldAttrs.nativeBuildInputs or []) ++ [
+            autoreconfHook gitMinimal python3
+          ];
+          prePatch = ''
+            patchShebangs tools
+            git init -q
+            git config user.email "nix-build@localhost"
+            git config user.name "Nix Wine build"
+            git add -A
+            git commit -q -m "Wine 11.15 pristine source"
+            wine_source="$PWD"
+            (cd ${wineStaging} &&
+              ${python3}/bin/python3 ./staging/patchinstall.py --all DESTDIR="$wine_source")
+            if find . -name '*.rej' -print -quit | grep -q .; then
+              echo "rejected Wine Staging hunks found" >&2
+              exit 1
+            fi
+          '';
           patches = [
-            ./wine-patches/wine-11.4-combined.patch
-            ./wine-patches/0001-resolve-drive-symlink.patch
-            ./wine-patches/0010-kernelbase-Correct-return-value-in-VirtualProtect-fo.patch
-            ./wine-patches/0011-kernelbase-Handle-NULL-old_prot-parameter-in-Virtual.patch
-            ./wine-patches/LoL-client-slow-start-fix.patch
+            ./wine-patches/0001-ntdll-report-writecopy-image-pages-shared.patch
+            ./wine-patches/0002-ntdll-account-for-pkru-xstate.patch
           ];
           preConfigure = (oldAttrs.preConfigure or "") + ''
             patchShebangs tools
@@ -72,7 +90,7 @@
             export WINE_BUILD=$(pwd)/build/wine-build
             export WINE_PREFIX=$(pwd)/build/wine-install
             echo "=== Wine Development Environment ==="
-            echo "Run './build-wine.sh' to build Wine 11.4 with patches"
+            echo "Run './build-wine.sh' to build Wine 11.15 with patches"
             echo "Run './test-wine.sh' to test with LoL replay"
           '';
         };
