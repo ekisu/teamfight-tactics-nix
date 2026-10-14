@@ -1,0 +1,30 @@
+Subject: [PATCH] dbgcore: Forward the public MiniDump exports to dbghelp.
+
+Provide the Windows dbgcore module and its public ordinals using Wine's
+existing dbghelp implementations, rather than substituting success results.
+
+--- a/configure.ac
++++ b/configure.ac
+@@ -2667,6 +2667,7 @@
+ WINE_CONFIG_MAKEFILE(dlls/davclnt)
+ WINE_CONFIG_MAKEFILE(dlls/dbgeng)
+ WINE_CONFIG_MAKEFILE(dlls/dbgeng/tests)
++WINE_CONFIG_MAKEFILE(dlls/dbgcore)
+ WINE_CONFIG_MAKEFILE(dlls/dbghelp)
+ WINE_CONFIG_MAKEFILE(dlls/dbghelp/tests)
+ WINE_CONFIG_MAKEFILE(dlls/dciman32)
+--- /dev/null
++++ b/dlls/dbgcore/Makefile.in
+@@ -0,0 +1,7 @@
++MODULE    = dbgcore.dll
++IMPORTLIB = dbgcore
++
++EXTRADLLFLAGS = -Wb,--data-only
++
++SOURCES = \
++	dbgcore.spec
+--- /dev/null
++++ b/dlls/dbgcore/dbgcore.spec
+@@ -0,0 +1,2 @@
++1 stdcall MiniDumpReadDumpStream(ptr long ptr ptr ptr) dbghelp.MiniDumpReadDumpStream
++2 stdcall MiniDumpWriteDump(ptr long ptr long ptr ptr ptr) dbghelp.MiniDumpWriteDump

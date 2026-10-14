@@ -1,18 +1,21 @@
-name: Release Wine
+name: Build Wine artifacts
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Wine version (pinned build: 11.15)'
+        description: 'Wine version (pinned upstream build: 11.19)'
         required: true
-        default: '11.15'
+        default: '11.19'
+      revision:
+        description: 'Explicit runtime revision (artifacts only; no publication)'
+        required: true
   push:
     tags:
       - 'wine-*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -24,13 +27,26 @@ jobs:
 
       - name: Determine Wine version
         id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_REVISION: ${{ inputs.revision }}
         run: |
+          set -euo pipefail
           if [ "${{ github.event_name }}" = "push" ]; then
-            VERSION="${GITHUB_REF_NAME#wine-}"
+            if [[ "$GITHUB_REF_NAME" =~ ^wine-(11\.19)-r([1-9][0-9]*)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+              REVISION="${BASH_REMATCH[2]}"
+            else
+              echo 'Expected a new runtime tag: wine-11.19-r<revision>' >&2
+              exit 2
+            fi
           else
-            VERSION="${{ inputs.version }}"
+            VERSION="$REQUESTED_VERSION"
+            REVISION="$REQUESTED_REVISION"
           fi
+          [[ "$VERSION" == '11.19' && "$REVISION" =~ ^[1-9][0-9]*$ ]]
           echo "wine_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "runtime_version=$VERSION-r$REVISION" >> "$GITHUB_OUTPUT"
 
       - name: Install build dependencies
         run: |
@@ -42,7 +58,7 @@ jobs:
           # Build tools
           sudo apt-get install -y \
             autoconf bison flex gcc g++ git perl python3 curl \
-            ccache gettext pkg-config make zstd
+            ccache gettext pkg-config make zstd xvfb xauth
 
           # Cross-compilation for Windows PE binaries (wow64)
           sudo apt-get install -y \
@@ -107,6 +123,24 @@ jobs:
           sudo curl -sL -o /usr/lib/oss/include/sys/soundcard.h \
             https://salsa.debian.org/debian/oss4/-/raw/debian/4.2-build2020-6/include/soundcard.h
 
+      - name: Identify compiler toolchain
+        id: compiler
+        run: |
+          set -euo pipefail
+          FINGERPRINT="$(
+            {
+              printf '%s\n' "$RUNNER_OS" "$RUNNER_ARCH" 'ubuntu-24.04'
+              getconf GNU_LIBC_VERSION || exit 1
+              for compiler in gcc g++ i686-w64-mingw32-gcc x86_64-w64-mingw32-gcc; do
+                executable="$(command -v "$compiler")" || exit 1
+                sha256sum "$(readlink -f "$executable")" || exit 1
+                "$compiler" -dumpmachine || exit 1
+                "$compiler" -dumpfullversion -dumpversion || exit 1
+              done
+            } | sha256sum | cut -d' ' -f1
+          )"
+          echo "fingerprint=$FINGERPRINT" >> "$GITHUB_OUTPUT"
+
       - name: Create ccache directory
         run: mkdir -p ~/.cache/ccache
 
@@ -114,19 +148,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-wine-${{ steps.version.outputs.wine_version }}-${{ github.run_id }}
+          key: ccache-wine-${{ runner.os }}-${{ runner.arch }}-ubuntu2404-${{ steps.compiler.outputs.fingerprint }}-${{ steps.version.outputs.wine_version }}-upstream-newwow64-fortify0-${{ hashFiles('wine-build-manifest.json', 'build-wine-ci.sh', '.github/workflows/release.yml', 'wine-patches/0003-kernel32-implement-settimerqueuetimer.patch', 'wine-patches/0004-ntdll-match-native-x64-dispatcher-layout.patch', 'wine-patches/0005-dbgcore-forward-minidump-exports.patch') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ccache-wine-${{ steps.version.outputs.wine_version }}-
-            ccache-wine-
+            ccache-wine-${{ runner.os }}-${{ runner.arch }}-ubuntu2404-${{ steps.compiler.outputs.fingerprint }}-${{ steps.version.outputs.wine_version }}-upstream-newwow64-fortify0-${{ hashFiles('wine-build-manifest.json', 'build-wine-ci.sh', '.github/workflows/release.yml', 'wine-patches/0003-kernel32-implement-settimerqueuetimer.patch', 'wine-patches/0004-ntdll-match-native-x64-dispatcher-layout.patch', 'wine-patches/0005-dbgcore-forward-minidump-exports.patch') }}-
 
       - name: Build Wine
         env:
           WINE_VERSION: ${{ steps.version.outputs.wine_version }}
+          CCACHE_COMPILERCHECK: content
+        # This Ubuntu artifact has its own libc ABI. Source/test success does not
+        # establish acceptance of the separate Nix/current-host graphics runtime.
         run: bash build-wine-ci.sh
 
       - name: Package artifacts
         run: |
-          VERSION="${{ steps.version.outputs.wine_version }}"
+          VERSION="${{ steps.version.outputs.runtime_version }}"
           TARBALL="wine-${VERSION}-x86_64-linux.tar.gz"
 
           cd /tmp/wine-build-ci/wine-install/opt/wine
@@ -137,20 +173,12 @@ jobs:
       - name: Upload artifacts (for workflow run)
         uses: actions/upload-artifact@v4
         with:
-          name: wine-${{ steps.version.outputs.wine_version }}-x86_64-linux
+          name: wine-${{ steps.version.outputs.runtime_version }}-x86_64-linux
           path: |
             /tmp/wine-build-ci/wine-*.tar.gz
             /tmp/wine-build-ci/wine-*.tar.gz.sha256
           retention-days: 7
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: wine-${{ steps.version.outputs.wine_version }}
-          name: Wine ${{ steps.version.outputs.wine_version }}
-          files: |
-            /tmp/wine-build-ci/wine-*.tar.gz
-            /tmp/wine-build-ci/wine-*.tar.gz.sha256
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Artifact-only: this Ubuntu runtime has not passed authenticated Home.
+      # Future publication must separately accept this exact tarball SHA-256,
+      # bind its source/toolchain identity, and reject an existing release.

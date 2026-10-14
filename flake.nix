@@ -3,7 +3,7 @@
 
   inputs = {
     flake-utils.url = "github:numtide/flake-utils";
-    nixpkgs.url = "github:NixOS/nixpkgs?ref=15f4ee454b1dce334612fa6843b3e05cf546efab";
+    nixpkgs.url = "github:NixOS/nixpkgs/c59305bab2065cfecc4944690d9eedbb56f3a9fa";
   };
 
   outputs = { self, flake-utils, nixpkgs }:
@@ -14,48 +14,76 @@
         pkgs = import nixpkgs {
           inherit system;
         };
-        wineStaging = pkgs.fetchzip {
-          url = "https://gitlab.winehq.org/wine/wine-staging/-/archive/634865f9e409c7101adc6809f23af34d2a668525/wine-staging-634865f9e409c7101adc6809f23af34d2a668525.tar.gz";
-          hash = "sha256-/mu7seIsrkXzfJjIzyrMavBT6ZC8Gz/6PZPm9TjjekE=";
+        manifest = builtins.fromJSON (builtins.readFile ./wine-build-manifest.json);
+        customPatches = map (patch: {
+          path = ./wine-patches + "/${patch.file}";
+          inherit (patch) sha256;
+        }) manifest.patches;
+        dxvk = pkgs.fetchurl {
+          url = "https://github.com/doitsujin/dxvk/releases/download/v${manifest.graphics.dxvk_version}/dxvk-${manifest.graphics.dxvk_version}.tar.gz";
+          sha256 = manifest.graphics.dxvk_sha256;
+        };
+        vkd3d = pkgs.fetchurl {
+          url = "https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v${manifest.graphics.vkd3d_proton_version}/vkd3d-proton-${manifest.graphics.vkd3d_proton_version}.tar.zst";
+          sha256 = manifest.graphics.vkd3d_proton_sha256;
         };
       in with pkgs; {
-        packages.wine = (wineWow64Packages.full.overrideAttrs (oldAttrs: {
-          version = "11.15";
+        packages.wine = assert builtins.all (patch:
+          builtins.hashFile "sha256" patch.path == patch.sha256) customPatches;
+          ((wineWow64Packages.full.override { wineRelease = "unstable"; }).overrideAttrs (oldAttrs: {
+          version = manifest.wine.version;
+          meta = (oldAttrs.meta or {}) // { version = manifest.wine.version; };
           src = fetchurl {
-            url = "https://dl.winehq.org/wine/source/11.x/wine-11.15.tar.xz";
-            hash = "sha256-UEbzba4hCxmOppeSd01EAf7tl11GXspsJRyTlEAOwnI=";
+            url = manifest.wine.url;
+            hash = manifest.wine.sri;
           };
           nativeBuildInputs = (oldAttrs.nativeBuildInputs or []) ++ [
-            autoreconfHook gitMinimal python3
+            autoreconfHook perl python3 zstd
           ];
           prePatch = ''
             patchShebangs tools
-            git init -q
-            git config user.email "nix-build@localhost"
-            git config user.name "Nix Wine build"
-            git add -A
-            git commit -q -m "Wine 11.15 pristine source"
-            wine_source="$PWD"
-            (cd ${wineStaging} &&
-              ${python3}/bin/python3 ./staging/patchinstall.py --all DESTDIR="$wine_source")
-            if find . -name '*.rej' -print -quit | grep -q .; then
-              echo "rejected Wine Staging hunks found" >&2
-              exit 1
-            fi
           '';
-          patches = [
-            ./wine-patches/0001-ntdll-report-writecopy-image-pages-shared.patch
-            ./wine-patches/0002-ntdll-account-for-pkru-xstate.patch
-          ];
+          patches = map (patch: patch.path) customPatches;
+          patchFlags = [ "-p1" "--fuzz=0" "--forward" "--batch" ];
+          # Match the accepted local profile; this is not a PKRU/bounds proof.
+          hardeningDisable = lib.unique ((oldAttrs.hardeningDisable or []) ++ [ "fortify" ]);
+          env = (oldAttrs.env or {}) // {
+            CFLAGS = manifest.build_profile.cflags;
+          };
           preConfigure = (oldAttrs.preConfigure or "") + ''
             patchShebangs tools
+            tools/make_requests
             autoreconf -f
+          '';
+          postInstall = (oldAttrs.postInstall or "") + ''
+            mkdir -p "$TMPDIR/tft-bundles/dxvk" "$TMPDIR/tft-bundles/vkd3d"
+            tar -xzf ${dxvk} -C "$TMPDIR/tft-bundles/dxvk"
+            tar --zstd -xf ${vkd3d} -C "$TMPDIR/tft-bundles/vkd3d"
+            for arch in x64 x32; do
+              mkdir -p "$out/share/dxvk/$arch"
+              for dll in d3d9.dll d3d10core.dll d3d11.dll dxgi.dll; do
+                install -m644 "$TMPDIR/tft-bundles/dxvk/dxvk-${manifest.graphics.dxvk_version}/$arch/$dll" "$out/share/dxvk/$arch/"
+              done
+            done
+            mkdir -p "$out/share/vkd3d-proton/x64"
+            for dll in d3d12.dll d3d12core.dll; do
+              install -m644 "$TMPDIR/tft-bundles/vkd3d/vkd3d-proton-${manifest.graphics.vkd3d_proton_version}/x64/$dll" "$out/share/vkd3d-proton/x64/"
+            done
+            test "$(find "$out/share/dxvk" "$out/share/vkd3d-proton" -type f -name '*.dll' | wc -l)" -eq 10
+            (cd "$out"; find share/dxvk share/vkd3d-proton -type f -name '*.dll' -print0 | sort -z | xargs -0 sha256sum) > "$out/graphics-dlls.sha256"
+            test -f "$out/lib/wine/x86_64-windows/ntdll.dll"
+            test -f "$out/lib/wine/i386-windows/ntdll.dll"
+            test -f "$out/lib/wine/x86_64-windows/dbgcore.dll"
+            test -f "$out/lib/wine/i386-windows/dbgcore.dll"
+            test ! -e "$out/lib/wine/i386-unix"
+            cp ${./wine-build-manifest.json} "$out/source-recipe.json"
           '';
         }));
 
         devShells.default = mkShell {
           nativeBuildInputs = [
             bison flex fontforge pkg-config autoconf hexdump perl python3 gitMinimal gettext
+            xvfb
             pkgsCross.mingw32.buildPackages.gcc
             pkgsCross.mingwW64.buildPackages.gcc
           ];
@@ -72,7 +100,7 @@
             wayland wayland-scanner libxkbcommon wayland-protocols libgbm
           ];
 
-          hardeningDisable = [ "bindnow" "stackclashprotection" "format" ];
+          hardeningDisable = [ "bindnow" "stackclashprotection" "format" "fortify" ];
 
           NIX_LDFLAGS = builtins.toString ([
             "-rpath ${lib.makeLibraryPath ([
@@ -90,7 +118,7 @@
             export WINE_BUILD=$(pwd)/build/wine-build
             export WINE_PREFIX=$(pwd)/build/wine-install
             echo "=== Wine Development Environment ==="
-            echo "Run './build-wine.sh' to build Wine 11.15 with patches"
+            echo "Pinned package: Wine 11.19 upstream with three native API patches"
             echo "Run './test-wine.sh' to test with LoL replay"
           '';
         };

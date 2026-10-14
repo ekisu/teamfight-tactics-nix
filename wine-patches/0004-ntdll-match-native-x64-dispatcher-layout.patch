@@ -1,0 +1,33 @@
+Subject: [PATCH] ntdll: Match native x64 exception dispatcher argument setup.
+
+Some applications decode KiUserExceptionDispatcher to locate its dispatch
+call. Native Windows 10 build 19045 constructs the exception-record argument
+with MOV followed by ADD, twice, placing the relative dispatch CALL at 0x29.
+Wine's equivalent LEA sequence puts that CALL at 0x25 instead.
+
+Use the native sequence without changing the exception record, context,
+WOW64 callback, branch or exception dispatch implementation. Hardware delivery,
+nested VEH, SEH unwind, nonvolatile registers, DF and x86 WoW64 continuation
+tests pass independently from the read-only native-layout test.
+
+--- a/dlls/ntdll/signal_x86_64.c
++++ b/dlls/ntdll/signal_x86_64.c
+@@ -366,11 +366,15 @@
+                    "mov " __ASM_NAME("pWow64PrepareForException") "(%rip),%rax\n\t"
+                    "test %rax,%rax\n\t"
+                    "jz 1f\n\t"
++                   /* Keep the native argument-setup layout: applications also
++                    * decode the dispatch call at offset 0x29. */
++                   "mov %rsp,%rcx\n\t"
++                   "add $0x4f0,%rcx\n\t"        /* rec */
+                    "mov %rsp,%rdx\n\t"           /* context */
+-                   "lea 0x4f0(%rsp),%rcx\n\t"    /* rec */
+                    "call *%rax\n"
+-                   "1:\tmov %rsp,%rdx\n\t" /* context */
+-                   "lea 0x4f0(%rsp),%rcx\n\t" /* rec */
++                   "1:\tmov %rsp,%rcx\n\t"
++                   "add $0x4f0,%rcx\n\t" /* rec */
++                   "mov %rsp,%rdx\n\t" /* context */
+                    "call " __ASM_NAME("dispatch_exception") "\n\t"
+                    "int3" )
+ 

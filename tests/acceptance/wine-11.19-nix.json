@@ -1,0 +1,54 @@
+{
+  "date_utc": "2026-10-14",
+  "scope": "Exact Nix package on the tested Linux host; not a portable CI artifact or gameplay acceptance",
+  "recipe_sha256": "fefc8ea794a43c6468622537433419288536a8c5269baed82f5555628670d9f3",
+  "nix_derivation": "/nix/store/mz2m5ncdcx28glv0mciw7kk1lz22rmvw-wine-wow64-11.19.drv",
+  "nix_output": "/nix/store/zmacz7mx5y5ir2p85hvbcwn3kjkj4d4n-wine-wow64-11.19",
+  "wine_loader_sha256": "8a594e9a4c46271ecf693ad4c467ff805d290e8ce2b1b59e4e79c09e35f5ea27",
+  "ntdll_x64_sha256": "b652f8cb89b045062a92701216f5870a62dbe7ceee00affc9d4bffa60166fd9a",
+  "client_shipping_sha256": "a3f40e9a2b65d49e272067bf1f65a07e0d32c39173ea77dc1fc616c0851205f8",
+  "offline_fixture_exits": {
+    "dispatcher_functional_x64": 0,
+    "dispatcher_native_layout_x64": 0,
+    "dispatcher_nested_unwind_nonvolatile_df_x64": 0,
+    "dispatcher_hardware_continuation_x86": 0,
+    "timer_queue_x64": 0,
+    "timer_queue_x86": 0,
+    "dbgcore_public_forwarders_x64": 0,
+    "dbgcore_public_forwarders_x86": 0
+  },
+  "promoted_test_suites": {
+    "dispatcher_launcher_exit": 0,
+    "dispatcher_x64_x86_layout_exits": [0, 0, 0],
+    "timer_launcher_exit": 0,
+    "timer_x64_x86_exits": [0, 0],
+    "prefix_scoped_cleanup_pass": true,
+    "test_inputs_and_runtime_unchanged": true,
+    "core_soft_hard_limits": [0, 0]
+  },
+  "graphics": {
+    "host_libc": "glibc-2.44",
+    "host_driver": "Mesa 26.2.3",
+    "reported_hardware_device": "AMD Radeon RX 6700 XT",
+    "default_host_driver_selection": true,
+    "ten_dll_hashes_match_accepted_spatula_payloads": true,
+    "normal_vulkan_dxgi_d3d11_d3d12_exits": [0, 0, 0, 0],
+    "standalone_internal_winevulkan_probe_exit": 1,
+    "internal_probe_note": "Direct internal-DLL initialization control still fails; normal Vulkan and D3D consumer paths pass"
+  },
+  "frontend": {
+    "accepted": true,
+    "normal_browser_authorization": true,
+    "normal_spatula_client_config_proxy": true,
+    "shipping_alive_at_seconds": [120, 180],
+    "home_visually_reviewed_at_seconds": [120, 180],
+    "cropped_image_sha256": [
+      "7cfb930c3779b1270bb2f37eefcbdfc1d786f669496de3fc58c4967967d42eb5",
+      "77e693651ce7cf1933f422a7ffb661d7424322ddc1c8fc271e8cbc359c818dec"
+    ],
+    "client_logs_discarded": true,
+    "private_account_data_in_record": false
+  },
+  "fortify_enabled": false,
+  "not_tested": ["match gameplay", "portable Ubuntu release", "full PKRU/xstate/memory conformance"]
+}

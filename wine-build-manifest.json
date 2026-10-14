@@ -1,0 +1,47 @@
+{
+  "recipe_version": 1,
+  "wine": {
+    "version": "11.19",
+    "corresponding_tag_commit": "455e3509b98a6919fd4ad1def4803e08c41c03b2",
+    "url": "https://dl.winehq.org/wine/source/11.x/wine-11.19.tar.xz",
+    "sha256": "4820066eda68e553d330239ffc628164a348d1c623e49d058e011c5a7cda95f1",
+    "sri": "sha256-SCAGbtpo5VPTMCOf/GKBZKNI0cYj5J0FjgEcWnzalfE=",
+    "staging": false,
+    "topology": "unified-new-wow64-x86_64-i386"
+  },
+  "nixpkgs_rev": "c59305bab2065cfecc4944690d9eedbb56f3a9fa",
+  "patches": [
+    {
+      "file": "0003-kernel32-implement-settimerqueuetimer.patch",
+      "sha256": "eac0d5c97b6bb7e5c4be63d9235b82285af55f94012332543b9ce35602c165d0"
+    },
+    {
+      "file": "0004-ntdll-match-native-x64-dispatcher-layout.patch",
+      "sha256": "3fb7a7da54877dfc9269d6414e0da719701828a69101195847e33e8b881b7442"
+    },
+    {
+      "file": "0005-dbgcore-forward-minidump-exports.patch",
+      "sha256": "5a6b3794afe06006dcc4fbc9a44269f2d358c1166af13e4be84ac7cb44a4773c"
+    }
+  ],
+  "build_profile": {
+    "cflags": "-std=gnu17 -O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0",
+    "fortify": false,
+    "custom_pkru_patch": false,
+    "forced_shared": false,
+    "custom_diagnostic_traces": false,
+    "tested_nix_host_libc": "glibc-2.44",
+    "note": "FORTIFY-disabled local reproduction; not a full PKRU/xstate/memory-conformance proof"
+  },
+  "graphics": {
+    "dxvk_version": "2.7.1",
+    "dxvk_sha256": "d85ce7c79f57ecd765aaa1b9e7007cb875e6fde9f6d331df799bce73d513ce87",
+    "vkd3d_proton_version": "3.0.1",
+    "vkd3d_proton_sha256": "3cf2315522af5e43605ef6d3c41dad91387040bf97199934f3f7ab76caaa2f0c",
+    "dll_count": 10,
+    "dxvk_dlls": ["d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll"],
+    "dxvk_architectures": ["x64", "x32"],
+    "vkd3d_proton_dlls": ["d3d12.dll", "d3d12core.dll"],
+    "vkd3d_proton_architectures": ["x64"]
+  }
+}
