@@ -16,8 +16,11 @@ new WoW64. Its exact source/patch/graphics hashes are in
 Both the local 11.19 build and the clean **Nix package** reached current-client
 **Home** using the user's genuine Spatula browser session and client-config proxy,
 observed at 120 and 180 seconds (60-second hold). The host used default
-Mesa 26.2.3/glibc 2.44, without driver/capability overrides. Package provenance
-and results are in `tests/acceptance/wine-11.19-nix.json`.
+Mesa 26.2.3/glibc 2.44, without driver/capability overrides. The exact Ubuntu CI
+archive also passed this authenticated Home check before publication as
+**[wine-11.19-r1](https://github.com/ekisu/teamfight-tactics-nix/releases/tag/wine-11.19-r1)**.
+Provenance and results are in `tests/acceptance/wine-11.19-nix.json` and
+`tests/acceptance/wine-11.19-ci.json`.
 Offline x64/x86 timer, exception/continuation, and `dbgcore` export tests pass
 on that package. This is launch acceptance, not match gameplay or universal
 host compatibility; another artifact still requires its own validation.
@@ -36,14 +39,21 @@ Legacy forced-Shared/PKRU patch files are preserved but are not activated.
 No investigation-only loader, exception-trace, or startup-pause patches are used.
 
 The package also bundles DXVK 2.7.1 and VKD3D-Proton 3.0.1.
-`.github/workflows/release.yml` currently builds **workflow artifacts only**, with
-SHA-256 checksums and an explicitly supplied revision (`wine-11.19-rN`). Its
-Ubuntu runtime is a distinct artifact without authenticated Home acceptance;
-the workflow creates or updates no GitHub release. Future publication is a
-separate decision requiring acceptance of the **exact tarball hash**, bound
-source/toolchain provenance, and a new unused release identity. Do not overwrite
-existing releases. Spatula's normal verified updater only receives published
-runtimes; editing or building this repository does not update a managed runtime.
+`.github/workflows/release.yml` builds **workflow artifacts only**, with SHA-256
+checksums and an explicitly supplied revision (`wine-11.19-rN`). Publication is
+a separate promotion of the **exact accepted tarball**, not a rebuild. The
+published `wine-11.19-r1` retains the original validated CI bytes and checksum;
+its tag identifies the actual build commit. Future publication also requires
+artifact acceptance, bound provenance and a new unused identity. Do not
+overwrite releases. Spatula's normal verified updater receives published
+runtimes through GitHub's `releases/latest`, not workflow artifacts.
+
+Existing Spatula versions reject a different installed Wine instead of upgrading
+it in place. While Spatula and that prefix are not running, preserve the entire
+old `wine` directory (runtime, prefix and state) as a backup. The next normal
+Run downloads the new release and creates a fresh matching prefix. Keep the
+native `auth-profile`, account presentation, client state and TFT install in
+place; do not clear sign-in data or run another Wine over the old prefix.
 
 The exact graphics bundle is eight DXVK DLLs (x64/x32) and two x64 VKD3D DLLs.
 Bundling does not alter existing prefixes. As in Spatula, a launcher installs

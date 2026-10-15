@@ -1,0 +1,38 @@
+{
+  "date_utc": "2026-10-15",
+  "scope": "Exact Ubuntu CI archive on the tested Linux host; no gameplay or universal host compatibility claim",
+  "source_commit": "6c6e8a55b3d810187602bf3243f6febba6ebe7e3",
+  "recipe_sha256": "fefc8ea794a43c6468622537433419288536a8c5269baed82f5555628670d9f3",
+  "ci_run": "https://github.com/ekisu/teamfight-tactics-nix/actions/runs/38638701102",
+  "release": "https://github.com/ekisu/teamfight-tactics-nix/releases/tag/wine-11.19-r1",
+  "archive_name": "wine-11.19-r1-x86_64-linux.tar.gz",
+  "archive_sha256": "afa8352a3b01c0c130d6640ddab2d047f224efda7dba48219fad6d9a667af783",
+  "archive_size_bytes": 507421917,
+  "wine_binary_sha256": "8fc481d04ae0c97c9b686ce69c37b79041253f1e805fa2feb7e36637441fb42a",
+  "ntdll_x64_sha256": "7280e59f233b20540f5f691880de29fcd96cc3941c3e26e8fa6718b38e42a55e",
+  "ci_compiler": "GCC 13.3.0",
+  "ci_libc": "glibc 2.39",
+  "execution_host_libc": "glibc 2.44 through steam-run",
+  "host_driver": "default Mesa 26.2.3",
+  "eight_owned_x64_x86_api_fixture_exits": [0, 0, 0, 0, 0, 0, 0, 0],
+  "normal_vulkan_dxgi_d3d11_d3d12_exits": [0, 0, 0, 0],
+  "standalone_internal_winevulkan_control_exit": 1,
+  "ten_graphics_dll_hashes_match_accepted_spatula_payload": true,
+  "frontend": {
+    "accepted": true,
+    "normal_native_spatula_login_reuse_and_proxy": true,
+    "shipping_alive_and_home_visually_reviewed_at_seconds": [120, 180],
+    "image_wall_interval_seconds": 59.97518301010132,
+    "cropped_image_sha256": [
+      "b3938b55b8f1be9e2395ef052dc13e2f380866ee58552c0923570947283f5973",
+      "db6f740ad03f9fc94e0ccb762a5dc26b79895e2618849e2d9e719effb0d5d20d"
+    ],
+    "client_logs_discarded": true,
+    "private_account_data_in_record": false
+  },
+  "published_original_archive_without_rebuild_or_recompression": true,
+  "github_asset_digest_verified_before_publication": true,
+  "anonymous_latest_and_checksum_download_verified": true,
+  "fortify_enabled": false,
+  "not_tested": ["match gameplay", "full PKRU/xstate/memory conformance", "other host/GPU combinations"]
+}
